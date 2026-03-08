@@ -1,0 +1,18 @@
+# Rendered outputs
+*.html
+*_cache/
+*_files/
+
+# Large result files
+results/*.rds
+
+# OS
+.DS_Store
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# PDF outputs
+*.pdf
