@@ -8,8 +8,8 @@
 #SBATCH --partition=serial_std
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=96000mb
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64000mb
 #SBATCH --time=24:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=fabian.scheipl@stat.uni-muenchen.de
@@ -20,4 +20,4 @@ module load r/4.3.3-gcc13-mkl
 
 export R_LIBS_USER="${HOME}/R/x86_64-pc-linux-gnu-library/4.3"
 
-Rscript sim-run.R A 48
+Rscript sim-run.R A 32
