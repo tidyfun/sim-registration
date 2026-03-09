@@ -11,15 +11,15 @@
 
 # --- Study A: Main Study -----------------------------------------------------
 
-#' Study A design: 13 DGPs, always estimate template
+#' Study A design: 15 DGPs, always estimate template
 #'
-#' 13 DGPs x 2 severity x 2 noise x 5 methods = 260 cells x 100 reps
+#' 15 DGPs x 2 severity x 3 noise x 5 methods = 450 cells x 100 reps
 study_a_design <- function() {
   grid <- expand.grid(
-    dgp = paste0("D", sprintf("%02d", 1:13)),
+    dgp = paste0("D", sprintf("%02d", 1:15)),
     n_curves = 50,
     n_grid = 101,
-    noise_sd = c(0, 0.1),
+    noise_sd = c(0, 0.1, 0.3),
     severity = c(0.5, 1.0),
     stringsAsFactors = FALSE
   )

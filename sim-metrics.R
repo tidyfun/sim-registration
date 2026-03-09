@@ -6,7 +6,7 @@
 # Provides:
 #   extract_metrics()       - main entry: all metrics for one result
 #   Primary: warp_mise, alignment_error, template_mise
-#   Secondary: alignment_cc, time_per_curve, failure_rate
+#   Secondary: alignment_cc, template_elastic_dist, time_per_curve, failure_rate
 #   Diagnostics: registration_ratio, amplitude_variance_ratio, warp_slope_ratio
 
 if (requireNamespace("tf", quietly = TRUE)) library(tf) else
@@ -34,20 +34,11 @@ extract_metrics <- function(data, result) {
   true_prewarp <- data$true_prewarp
   n <- length(aligned)
 
-  # For domain-preserving warps: compare inverse warps directly
-
-  # (single inversion of smooth truth, avoids double-inversion error).
-  # For non-DP warps (affine): inv_warps have non-[0,1] domains, so compare
-  # forward warps instead (double inversion, but affine warps are simple).
-  is_dp <- all(abs(range(tf_arg(inv_warps_est)) - c(0, 1)) < 0.001)
-  if (is_dp) {
-    inv_warps_true <- safe_metric(function() tf_invert(warps_true))
-    warp_cmp_est <- inv_warps_est
-    warp_cmp_true <- inv_warps_true
-  } else {
-    warp_cmp_est <- safe_metric(function() tf_invert(inv_warps_est))
-    warp_cmp_true <- warps_true
-  }
+  # Compare forward warps for all methods and DGPs.
+  # tf_registration stores inverse warps, so invert once here to recover the
+  # estimated forward warp h(s) = t on the benchmark grid.
+  warp_cmp_est <- safe_metric(function() tf_invert(inv_warps_est))
+  warp_cmp_true <- warps_true
 
   metrics <- list(
     # Primary
@@ -66,6 +57,12 @@ extract_metrics <- function(data, result) {
       compute_template_mise,
       template_est,
       template_true
+    ),
+    template_elastic_dist = safe_metric(
+      compute_template_elastic_dist,
+      template_est,
+      template_true,
+      arg
     ),
     # Secondary
     alignment_cc = safe_metric(
@@ -107,6 +104,7 @@ failure_metrics <- function(result) {
     warp_mise = NA_real_,
     alignment_error = NA_real_,
     template_mise = NA_real_,
+    template_elastic_dist = NA_real_,
     alignment_cc = NA_real_,
     time_per_curve = NA_real_,
     registration_ratio_median = NA_real_,
@@ -131,8 +129,7 @@ safe_metric <- function(f, ...) {
 
 #' Warp Mean Integrated Squared Error
 #'
-#' Compares inverse warps: mean(tf_integrate((h^{-1}_est - h^{-1}_true)^2))
-#' Uses inverse warps directly to avoid double-inversion interpolation error.
+#' Compares forward warps: mean(tf_integrate((h_est - h_true)^2))
 compute_warp_mise <- function(warp_est, warp_true, arg) {
   if (is.null(warp_est) || inherits(warp_est, "numeric")) return(NA_real_)
   # Ensure both on same grid
@@ -158,6 +155,34 @@ compute_alignment_error <- function(aligned, true_prewarp) {
 compute_template_mise <- function(template_est, template_true) {
   sq_diff <- (template_est - template_true)^2
   as.numeric(tf_integrate(sq_diff))
+}
+
+#' Template elastic distance (Fisher-Rao / SRSF distance)
+#'
+#' Computes ||SRSF(f_est) - SRSF(f_true)||_L2 where
+#' SRSF q(t) = sign(f'(t)) * sqrt(|f'(t)|).
+#' This measures template shape distance invariant to reparameterization,
+#' unlike L2 MISE which conflates shape and phase error.
+compute_template_elastic_dist <- function(template_est, template_true, arg) {
+  d_est <- tf_derive(template_est)
+  d_true <- tf_derive(template_true)
+
+  srsf <- function(d) {
+    vals <- tf_evaluations(d)[[1]]
+    sign(vals) * sqrt(abs(vals))
+  }
+
+  q_est <- srsf(d_est)
+  q_true <- srsf(d_true)
+
+  # L2 distance via trapezoidal rule on the derivative grid
+  # tf_arg returns plain numeric vector for tfd_reg, not a list
+  d_arg <- as.numeric(tf_arg(d_est))
+  sq_diff <- (q_est - q_true)^2
+  # Trapezoidal integration
+  dt <- diff(d_arg)
+  mid <- (sq_diff[-length(sq_diff)] + sq_diff[-1]) / 2
+  sqrt(sum(mid * dt))
 }
 
 # --- Secondary Metrics --------------------------------------------------------

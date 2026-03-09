@@ -100,21 +100,21 @@ generate_smooth_warps <- function(
   warps / endpoint_vals
 }
 
-#' Affine warps: h_i(t) = a_i * t + b_i
+#' Affine warps: h_i(s) = a_i * s + b_i
 #'
 #' Non-domain-preserving. Post-hoc re-centered.
 #'
 #' @param n number of curves
 #' @param arg evaluation grid
 #' @param severity controls warp magnitude
-#' @return tfd of affine warps
+#' @return tfd of forward affine warps
 generate_affine_warps <- function(n, arg, severity = 0.5) {
-  sd_a <- 0.05 * severity
-  sd_b <- 0.03 * severity
-  lower_a <- 1 - 0.15 * severity
-  upper_a <- 1 + 0.15 * severity
-  lower_b <- -0.07 * severity
-  upper_b <- 0.07 * severity
+  sd_a <- 0.10 * severity
+  sd_b <- 0.06 * severity
+  lower_a <- 1 - 0.30 * severity
+  upper_a <- 1 + 0.30 * severity
+  lower_b <- -0.15 * severity
+  upper_b <- 0.15 * severity
 
   a <- rtruncnorm(n, mean = 1, sd = sd_a, lower = lower_a, upper = upper_a)
   b <- rtruncnorm(n, mean = 0, sd = sd_b, lower = lower_b, upper = upper_b)
@@ -125,6 +125,26 @@ generate_affine_warps <- function(n, arg, severity = 0.5) {
 
   warp_mat <- t(sapply(seq_len(n), function(i) a[i] * arg + b[i]))
   tfd(warp_mat, arg = arg)
+}
+
+#' Evaluate inverse affine warps on an observed-time grid
+#'
+#' Converts forward affine warps h_i(s) = a_i * s + b_i to inverse warp values
+#' h_i^{-1}(t) on the supplied grid t.
+#'
+#' @param warps tfd of forward affine warps on aligned-time grid
+#' @param arg observed-time grid for evaluating h^{-1}(t)
+#' @return numeric matrix with one row per curve and one column per arg value
+evaluate_inverse_affine_warps <- function(warps, arg) {
+  warp_mat <- as.matrix(tfd(warps, arg = tf_arg(warps)))
+  slope <- warp_mat[, ncol(warp_mat)] - warp_mat[, 1]
+  intercept <- warp_mat[, 1]
+
+  t(vapply(
+    seq_len(nrow(warp_mat)),
+    function(i) (arg - intercept[i]) / slope[i],
+    numeric(length(arg))
+  ))
 }
 
 #' Truncated normal distribution (rejection sampling)
@@ -183,8 +203,12 @@ generate_amplitude <- function(
     },
 
     rank2 = {
-      a <- rlnorm(n, meanlog = -amp_sd^2 / 2, sdlog = amp_sd)
-      c_shift <- rnorm(n, 0, amp_sd)
+      # Split total target variance amp_sd^2 equally between scale and shift
+      # so that total Var(a_i * m + c_i) ~ amp_sd^2 (comparable to other types)
+      scale_sd <- amp_sd / sqrt(2)
+      shift_sd <- amp_sd / sqrt(2)
+      a <- rlnorm(n, meanlog = -scale_sd^2 / 2, sdlog = scale_sd)
+      c_shift <- rnorm(n, 0, shift_sd)
       list(type = "rank2", a = a, c = c_shift)
     },
 
@@ -292,7 +316,7 @@ true_prewarp_curves <- function(amp, template, n, arg) {
 # --- DGP Specification Table --------------------------------------------------
 
 #' Get DGP specification
-#' @param dgp character: D01-D13
+#' @param dgp character: D01-D15
 #' @return list with template, phase, amplitude
 dgp_spec <- function(dgp) {
   specs <- list(
@@ -331,7 +355,10 @@ dgp_spec <- function(dgp) {
       amplitude = "highrank"
     ),
     D12 = list(template = "wiggly", phase = "complex", amplitude = "highrank"),
-    D13 = list(template = "wiggly", phase = "affine", amplitude = "highrank")
+    D13 = list(template = "wiggly", phase = "affine", amplitude = "highrank"),
+    # Added to complete key ladders (council review)
+    D14 = list(template = "wiggly", phase = "simple", amplitude = "none"),
+    D15 = list(template = "harmonic", phase = "affine", amplitude = "highrank")
   )
   if (!dgp %in% names(specs)) {
     cli::cli_abort(
@@ -383,12 +410,17 @@ generate_data <- function(
   # 3. Apply warps to template
   is_non_dp <- spec$phase == "affine"
   if (is_non_dp) {
-    # Non-domain-preserving: evaluate m at h_i(t), extrapolate at boundaries
+    # Non-domain-preserving: evaluate m at h_i^{-1}(t) so data$warps
+    # remains a forward warp, consistent with the other DGPs.
     template_vals <- tf_evaluations(template)[[1]]
-    warp_evals <- tf_evaluations(warps)
-    warped_mat <- t(sapply(warp_evals, function(w) {
-      approx(arg, template_vals, xout = w, rule = 2)$y
-    }))
+    inv_warp_mat <- evaluate_inverse_affine_warps(warps, arg)
+    warped_mat <- t(vapply(
+      seq_len(nrow(inv_warp_mat)),
+      function(i) {
+        approx(arg, template_vals, xout = inv_warp_mat[i, ], rule = 2)$y
+      },
+      numeric(length(arg))
+    ))
     warped <- tfd(warped_mat, arg = arg)
   } else {
     warped <- tf_warp(rep(template, n), warps)

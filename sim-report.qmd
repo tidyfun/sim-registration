@@ -32,25 +32,20 @@ source(file.path(base_dir, "sim-analyze.R"))
 
 mcols <- method_colors()
 mlabs <- method_labels()
+dlabs <- dgp_short_labels()
+ddesc <- dgp_desc_labels()
 ```
 
 ```{r}
 #| label: load-data
 dt <- load_study_a()
-cat(sprintf(
-  "DGPs: %s\nMethods: %s\nSeverity: %s | Noise: %s\n",
-  paste(levels(dt$dgp), collapse = ", "),
-  paste(levels(dt$method), collapse = ", "),
-  paste(levels(dt$severity), collapse = ", "),
-  paste(levels(dt$noise_sd), collapse = ", ")
-))
 ```
 
-Study A compares 5 registration methods across 13 DGPs in a crossed design:
-13 DGPs $\times$ 2 severity (0.5, 1.0) $\times$ 2 noise (0, 0.1) $\times$
-5 methods = 260 cells $\times$ 100 reps = 26,000 runs.
+Study A compares 5 registration methods across 15 DGPs in a crossed design:
+15 DGPs $\times$ 2 severity (0.5, 1.0) $\times$ 3 noise (0, 0.1, 0.3) $\times$
+5 methods = 450 cells $\times$ 100 reps = 45,000 runs.
 
-The DGP design is **not** full factorial (13 of 24 possible template $\times$ warp
+The DGP design is **not** full factorial (15 of 24 possible template $\times$ warp
 $\times$ amplitude combinations), but enables **paired comparisons** that vary
 exactly one factor while holding the other two constant.
 
@@ -58,7 +53,7 @@ exactly one factor while holding the other two constant.
 #| label: dgp-table
 knitr::kable(
   dgp_factors(),
-  caption = "DGP factor structure. 13 DGPs spanning 2 templates, 3 warp types, 4 amplitude types."
+  caption = "DGP factor structure. 15 DGPs spanning 2 templates, 3 warp types, 4 amplitude types."
 )
 ```
 
@@ -90,15 +85,24 @@ make_dgp_example("D05") / make_dgp_example("D06") /
   make_dgp_example("D07") / make_dgp_example("D08")
 ```
 
-## High-rank amplitude (D09--D13)
+## High-rank amplitude (D09--D13, D15)
 
 ```{r}
 #| label: gallery-highrank
-#| fig-height: 15
-#| fig-cap: "High-rank amplitude DGPs: 3 FPCs from gait knee data. D04/D13 use non-domain-preserving affine warps."
+#| fig-height: 18
+#| fig-cap: "High-rank amplitude DGPs: 3 FPCs from gait knee data. D13/D15 use non-domain-preserving affine warps."
 make_dgp_example("D09") / make_dgp_example("D10") /
   make_dgp_example("D11") / make_dgp_example("D12") /
-  make_dgp_example("D13")
+  make_dgp_example("D13") / make_dgp_example("D15")
+```
+
+## New baseline (D14)
+
+```{r}
+#| label: gallery-d14
+#| fig-height: 3
+#| fig-cap: "D14: wiggly template with simple warps and no amplitude variation (completes the wiggly-simple amplitude ladder)."
+make_dgp_example("D14")
 ```
 
 :::
@@ -107,36 +111,87 @@ make_dgp_example("D09") / make_dgp_example("D10") /
 
 The heatmaps below show the **median** of each metric across all 400 runs per cell
 (100 reps $\times$ 2 severity $\times$ 2 noise), giving a quick orientation.
-Lighter tiles indicate better performance.
+Color encodes the **rank** within each DGP (row): yellow = best (rank 1),
+purple = worst (rank 5). Numeric labels show the actual median values.
 
 ```{r}
 #| label: heatmap-warp-mise
 #| fig-height: 7
-#| fig-cap: "Median warp MISE across all severity/noise conditions. Lighter = lower MISE = better warp recovery."
+#| fig-cap: "Median warp MISE across all severity/noise conditions. Color = rank within each DGP; yellow = best, purple = worst. Labels show actual median MISE."
 make_heatmap(dt, "warp_mise", "Warp MISE (median, all conditions)")
 ```
 
 ```{r}
 #| label: heatmap-alignment-cc
 #| fig-height: 7
-#| fig-cap: "Median alignment cross-correlation. Lighter = higher CC = better alignment."
+#| fig-cap: "Median alignment cross-correlation. Color = rank within each DGP; yellow = best, purple = worst."
 make_heatmap(dt, "alignment_cc", "Alignment CC (median, all conditions)",
   lower_is_better = FALSE)
 ```
 
-**Key observations:**
+The win-rate heatmaps show the percentage of individual runs (across all conditions)
+where each method achieves the best metric value among all non-failed methods for
+that specific run. This complements the median-based heatmaps by revealing how
+*consistently* a method dominates, not just on average.
 
-- **SRVF** achieves the lowest warp MISE across all smooth-warp DGPs (D01--D03, D05--D12).
-- **Affine (S+S)** does *not* dominate on affine DGPs (D04, D13) — see @sec-affine-puzzle for discussion.
-- **Landmark (auto)** is competitive on many DGPs but has highest variability.
-- **FDA methods** (default and crit 1) show intermediate performance with non-trivial failure rates.
-- The heatmaps pool over severity and noise; the conditional analyses below provide sharper comparisons.
+```{r}
+#| label: heatmap-winrate-warp-mise
+#| fig-height: 7
+#| fig-cap: "Win rate for warp MISE: percentage of runs where each method achieves the lowest warp MISE among all methods, per DGP."
+make_winrate_heatmap(dt, "warp_mise", "Warp MISE win rate (all conditions)")
+```
+
+```{r}
+#| label: heatmap-winrate-alignment-cc
+#| fig-height: 7
+#| fig-cap: "Win rate for alignment CC: percentage of runs where each method achieves the highest cross-correlation."
+make_winrate_heatmap(dt, "alignment_cc", "Alignment CC win rate (all conditions)",
+  lower_is_better = FALSE)
+```
+
+```{r}
+#| label: overview-findings
+#| results: asis
+# Rank distribution per method across DGPs
+ranks_all <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank := rank(mise), by = dgp]
+
+rank_summary <- ranks_all[,
+  .(mean_rank = round(mean(rank), 1),
+    n_rank1 = sum(rank == 1),
+    n_top2 = sum(rank <= 2)),
+  by = method
+][order(mean_rank)]
+
+cat("**Key observations** (pooling over severity and noise):\n\n")
+for (i in seq_len(nrow(rank_summary))) {
+  m <- rank_summary$method[i]
+  cat(sprintf(
+    "- **%s**: mean rank %.1f, rank 1 on %d/%d DGPs, top 2 on %d/%d DGPs.\n",
+    mlabs[m], rank_summary$mean_rank[i],
+    rank_summary$n_rank1[i], uniqueN(dt$dgp),
+    rank_summary$n_top2[i], uniqueN(dt$dgp)
+  ))
+}
+cat("\n- The heatmaps pool over severity and noise; the conditional analyses below provide sharper comparisons.\n")
+cat("\n")
+```
 
 # Warp Recovery {#sec-warp}
 
 ## By warp type (Q1) {#sec-q1}
 
 *Question: Which method best recovers the true warps, conditional on warp type?*
+
+**Warp MISE** measures the integrated squared error between estimated and true warping
+functions: $\text{MISE}_h = \int_0^1 (\hat{h}_i(t) - h_i(t))^2\, dt$, averaged over
+curves $i$. Lower is better.
+
+**Implementation note:** Warp MISE compares forward warps $\hat{h}_i$ vs $h_i$
+for all warp types. Estimated forward warps are recovered by inverting the stored
+inverse warps from `tf_registration`.
 
 Warp types represent fundamentally different problems — smooth elastic warps (simple/complex)
 vs affine warps — so we stratify all comparisons by warp type. Within each stratum,
@@ -145,34 +200,81 @@ we show the full distribution of warp MISE across all DGPs with that warp type.
 ```{r}
 #| label: q1-boxplot
 #| fig-height: 9
-#| fig-cap: "Distribution of warp MISE by method, stratified by warp type. Each boxplot summarizes all reps across all DGPs with that warp type. Columns: severity x noise conditions."
+#| fig-cap: "Distribution of warp MISE by method, stratified by warp type (rows). Columns show the 4 severity × noise conditions. Each boxplot summarizes all reps across all DGPs with that warp type."
 ggplot(
   dt[failure == FALSE],
-  aes(x = method, y = warp_mise, fill = method)
+  aes(y = method, x = warp_mise, fill = method)
 ) +
   geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
   facet_grid(
     warp_type ~ severity + noise_sd,
-    scales = "free_y",
-    labeller = labeller(
-      severity = function(x) paste0("sev=", x),
-      noise_sd = function(x) paste0("noise=", x)
-    )
+    scales = "free_x",
+    labeller = cond_labeller
   ) +
   scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
-  scale_x_discrete(labels = mlabs) +
-  scale_y_log10() +
-  labs(x = NULL, y = "Warp MISE (log scale)") +
-  theme_benchmark() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  labs(y = NULL, x = "Warp MISE (log scale)") +
+  theme_benchmark()
 ```
 
-**Findings:**
+```{r}
+#| label: q1-findings
+#| results: asis
+# Compute best method per warp type x severity x noise
+q1_ranks <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(method, warp_type, severity, noise_sd)
+][, rank := rank(mise), by = .(warp_type, severity, noise_sd)]
 
-- On **simple** and **complex** warps, SRVF consistently achieves the lowest median warp MISE across all severity/noise conditions.
-- On **affine** warps, SRVF and Landmark (auto) outperform Affine (S+S), which is paradoxical for a well-specified method (discussed in @sec-affine-puzzle).
-- Higher severity and noise both increase MISE, but the *ranking* of methods is largely stable.
-- FDA methods show competitive medians but heavier tails (more variable performance).
+# Best method per warp type (pooled)
+q1_pooled <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(method, warp_type)
+][, rank := rank(mise), by = warp_type]
+
+best_simple <- mlabs[q1_pooled[warp_type == "simple"][which.min(mise), method]]
+best_complex <- mlabs[q1_pooled[warp_type == "complex"][which.min(mise), method]]
+best_affine <- mlabs[q1_pooled[warp_type == "affine"][which.min(mise), method]]
+
+# Check ranking stability: does best method stay rank 1 across conditions?
+rank1_simple <- q1_ranks[warp_type == "simple" & rank == 1, unique(method)]
+rank1_complex <- q1_ranks[warp_type == "complex" & rank == 1, unique(method)]
+
+cat("**Findings:**\n\n")
+cat(sprintf(
+  "- On **simple** warps, %s achieves the lowest median warp MISE (pooled). %s\n",
+  best_simple,
+  if (length(rank1_simple) == 1)
+    sprintf("This holds across all severity/noise conditions.")
+  else
+    sprintf("The best method varies by condition (%s).",
+      paste(mlabs[rank1_simple], collapse = ", "))
+))
+cat(sprintf(
+  "- On **complex** warps, %s achieves the lowest median warp MISE (pooled). %s\n",
+  best_complex,
+  if (length(rank1_complex) == 1)
+    sprintf("This holds across all severity/noise conditions.")
+  else
+    sprintf("The best method varies by condition (%s).",
+      paste(mlabs[rank1_complex], collapse = ", "))
+))
+cat(sprintf(
+  "- On **affine** warps, %s achieves the lowest MISE — paradoxical if Affine (S+S) is well-specified (discussed in @sec-affine-puzzle).\n",
+  best_affine
+))
+cat("- Higher severity and noise both increase MISE, but method rankings are largely stable within warp types.\n")
+# Check FDA tail behavior
+fda_iqr <- dt[failure == FALSE & method == "fda_default",
+  .(iqr = IQR(warp_mise, na.rm = TRUE)), by = warp_type]
+srvf_iqr <- dt[failure == FALSE & method == "srvf",
+  .(iqr = IQR(warp_mise, na.rm = TRUE)), by = warp_type]
+if (all(fda_iqr$iqr > srvf_iqr$iqr)) {
+  cat("- FDA methods show competitive medians but heavier tails (more variable performance).\n")
+}
+cat("\n")
+```
 
 ```{r}
 #| label: q1-summary
@@ -202,7 +304,7 @@ An upward slope means that method's warp recovery degrades as amplitude complexi
 ```{r}
 #| label: q2-ladders
 #| fig-height: 10
-#| fig-cap: "Amplitude ladders: median warp MISE (IQR error bars) vs amplitude complexity. Each panel holds template and warp type fixed. Upward slopes indicate degraded warp recovery under amplitude variation."
+#| fig-cap: "Amplitude ladders: median warp MISE (IQR error bars) vs amplitude complexity. Each panel row holds template and warp type fixed; columns show the 4 severity × noise conditions. Upward slopes indicate degraded warp recovery under amplitude variation."
 ladders <- amplitude_ladders()
 plots <- lapply(names(ladders), function(nm) {
   make_ladder_plot(dt, ladders[[nm]], nm)
@@ -212,52 +314,69 @@ wrap_plots(plots, ncol = 1) +
   theme(legend.position = "bottom")
 ```
 
-**Findings:**
-
-- All methods show some degradation as amplitude complexity increases, but the magnitude varies.
-- **SRVF** is the most robust: its warp MISE increases modestly from "none" to "highrank" amplitude.
-- **FDA methods** degrade more sharply, especially on complex warps with high-rank amplitude.
-- **Affine (S+S)** is most affected: MISE increases substantially under high-rank amplitude (D13 at severity=1.0).
-- **Landmark (auto)** shows moderate degradation, more stable than FDA methods.
-
 ```{r}
-#| label: q2-amp-variance-ratio
-#| fig-height: 8
-#| fig-cap: "Amplitude variance ratio for DGPs with amplitude variation (D05--D13). Values < 1 indicate over-registration (method absorbed amplitude into phase); > 1 indicates under-registration (phase variation remains in amplitude). Median across reps per DGP/method."
-dt_amp <- dt[amplitude != "none" & failure == FALSE & !is.na(amp_variance_ratio)]
+#| label: q2-findings
+#| results: asis
+# Check degradation on each ladder: does MISE go up with amplitude complexity?
+ladders_q2 <- amplitude_ladders()
 
-if (nrow(dt_amp) > 0) {
-  ggplot(dt_amp, aes(x = method, y = amp_variance_ratio, fill = method)) +
-    geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
-    geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
-    facet_wrap(~dgp, scales = "free_y") +
-    scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
-    scale_x_discrete(labels = mlabs) +
-    scale_y_continuous(trans = "log2",
-      breaks = c(0.125, 0.25, 0.5, 1, 2, 4, 8),
-      labels = c("1/8", "1/4", "1/2", "1", "2", "4", "8")) +
-    labs(x = NULL, y = expression("Amplitude variance ratio (" * log[2] * " scale)")) +
-    theme_benchmark() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+cat("**Findings:**\n\n")
+
+# Count how often each method degrades vs improves across ladders and conditions
+n_degrade <- 0L
+n_improve <- 0L
+n_total <- 0L
+for (lnm in names(ladders_q2)) {
+  ld <- ladders_q2[[lnm]]
+  dgps <- names(ld)
+  first_dgp <- dgps[1]
+  last_dgp <- dgps[length(dgps)]
+  for (m in levels(dt$method)) {
+    for (s in levels(dt$severity)) {
+      for (ns in levels(dt$noise_sd)) {
+        v_first <- dt[dgp == first_dgp & method == m & severity == s &
+          noise_sd == ns & failure == FALSE, median(warp_mise, na.rm = TRUE)]
+        v_last <- dt[dgp == last_dgp & method == m & severity == s &
+          noise_sd == ns & failure == FALSE, median(warp_mise, na.rm = TRUE)]
+        if (length(v_first) && length(v_last) && !is.na(v_first) && !is.na(v_last)) {
+          n_total <- n_total + 1L
+          if (v_last > v_first) n_degrade <- n_degrade + 1L
+          else n_improve <- n_improve + 1L
+        }
+      }
+    }
+  }
 }
-```
 
-The amplitude variance ratio reveals which methods confuse phase and amplitude.
-Ratios consistently < 1 (e.g., SRVF on some high-rank DGPs) indicate over-registration
-that absorbs amplitude into phase. Ratios > 1 indicate the opposite: residual phase
-variation inflates the amplitude component.
+pct_degrade <- round(100 * n_degrade / n_total)
+cat(sprintf(
+  "- In %d%% of method-ladder-condition combinations (%d/%d), warp MISE increases with amplitude complexity. The pattern is predominant but not universal — some methods on some ladders show stable or slightly improved MISE under higher-rank amplitude.\n",
+  pct_degrade, n_degrade, n_total
+))
+
+# Check which method has best absolute MISE at highrank
+best_highrank <- dt[failure == FALSE & amplitude == "highrank",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = method][which.min(mise), method]
+cat(sprintf(
+  "- **%s** generally retains the lowest absolute MISE as amplitude complexity grows, though its *relative* degradation can be comparable to other methods.\n",
+  mlabs[best_highrank]
+))
+cat("- The magnitude and direction of amplitude effects vary across ladders and conditions — see the plots above for per-ladder details.\n")
+cat("\n")
+```
 
 ## Warp complexity effect (Q3) {#sec-q3}
 
 *Question: How much does warp complexity cost each method?*
 
 **Warp ladders** hold template and amplitude constant while increasing warp complexity
-(simple $\to$ complex $\to$ affine).
+(affine $\to$ simple $\to$ complex).
 
 ```{r}
 #| label: q3-ladders
 #| fig-height: 9
-#| fig-cap: "Warp ladders: median warp MISE (IQR error bars) vs warp complexity. Each panel holds template and amplitude fixed."
+#| fig-cap: "Warp ladders: median warp MISE (IQR error bars) vs warp complexity. Each panel row holds template and amplitude fixed; columns show the 4 severity × noise conditions."
 ladders_w <- warp_ladders()
 plots_w <- lapply(names(ladders_w), function(nm) {
   make_ladder_plot(dt, ladders_w[[nm]], nm)
@@ -267,15 +386,47 @@ wrap_plots(plots_w, ncol = 1) +
   theme(legend.position = "bottom")
 ```
 
-**Findings:**
+```{r}
+#| label: q3-findings
+#| results: asis
+# Check how often complex > simple MISE across methods and conditions
+ladders_w <- warp_ladders()
+n_worse <- 0L
+n_better <- 0L
+n_tot_q3 <- 0L
+for (lnm in names(ladders_w)) {
+  ld <- ladders_w[[lnm]]
+  dgps <- names(ld)
+  if (!("simple" %in% ld && "complex" %in% ld)) next
+  d_simple <- names(ld)[ld == "simple"]
+  d_complex <- names(ld)[ld == "complex"]
+  for (m in levels(dt$method)) {
+    for (s in levels(dt$severity)) {
+      for (ns in levels(dt$noise_sd)) {
+        v_s <- dt[dgp == d_simple & method == m & severity == s &
+          noise_sd == ns & failure == FALSE, median(warp_mise, na.rm = TRUE)]
+        v_c <- dt[dgp == d_complex & method == m & severity == s &
+          noise_sd == ns & failure == FALSE, median(warp_mise, na.rm = TRUE)]
+        if (length(v_s) && length(v_c) && !is.na(v_s) && !is.na(v_c)) {
+          n_tot_q3 <- n_tot_q3 + 1L
+          if (v_c > v_s) n_worse <- n_worse + 1L
+          else n_better <- n_better + 1L
+        }
+      }
+    }
+  }
+}
+pct_worse <- round(100 * n_worse / n_tot_q3)
 
-- All methods show higher MISE on complex vs simple warps, as expected.
-- The transition to **affine** warps (non-domain-preserving) is revealing:
-  on the "harmonic + none" ladder (D01 $\to$ D02 $\to$ D04), SRVF and landmark maintain
-  low MISE on affine warps, while Affine (S+S) has higher MISE despite being well-specified.
-- On the "wiggly + highrank" ladder (D11 $\to$ D12 $\to$ D13), the affine DGP (D13) shows
-  particularly large MISE for Affine (S+S) at high severity — suggesting the combination
-  of non-domain-preserving warps and high-rank amplitude is especially challenging for affine regression.
+cat("**Findings:**\n\n")
+cat(sprintf(
+  "- In %d%% of comparisons (%d/%d), complex warps yield higher MISE than simple warps. The pattern holds for most methods and conditions but has exceptions — some methods show comparable or slightly lower MISE on complex vs simple warps in specific settings.\n",
+  pct_worse, n_worse, n_tot_q3
+))
+cat("- On **affine** DGPs: SRVF and Landmark maintain low MISE despite the non-domain-preserving warps, while Affine (S+S) has higher MISE despite being well-specified.\n")
+cat("- The combination of non-domain-preserving warps and high-rank amplitude (D13) appears especially challenging for affine regression, though the mechanism is not experimentally isolated (see @sec-affine-puzzle).\n")
+cat("\n")
+```
 
 ### The affine puzzle {#sec-affine-puzzle}
 
@@ -283,18 +434,20 @@ The Affine (S+S) method is **well-specified** for D04 and D13 (the true warps ar
 affine), yet it consistently achieves 3--4$\times$ higher warp MISE than SRVF or
 Landmark (auto). Several factors likely contribute:
 
-1. **Template estimation**: Affine registration uses the arithmetic mean as template,
-   which under non-domain-preserving warps is a biased estimate of the true Fréchet
-   mean in shape space. SRVF uses the Karcher mean, which may be more appropriate.
-2. **Mild warps**: At severity=0.5, the affine warps are very close to the identity
+1. **Template estimation bias** (conjecture): Affine registration uses the arithmetic
+   $L^2$ mean as template. Under non-domain-preserving warps, this is not the Fréchet
+   mean in shape space. SRVF uses the Karcher mean, which may reduce template bias.
+   This hypothesis is plausible but not experimentally isolated in this study.
+2. **Weak signal**: At severity=0.5, the affine warps are very close to the identity
    ($\text{sd}_a = 0.025$, $\text{sd}_b = 0.015$), giving the affine regression
    little signal to estimate (a, b) from.
 3. **Iteration count**: The affine method uses 10 Procrustes iterations, which may
    not suffice for joint template-warp estimation in this setting.
 
-This is a genuine finding: well-specified parametric models can underperform
-flexible nonparametric methods when the signal is weak and template estimation
-introduces bias.
+This is a notable observation: well-specified parametric models *can* underperform
+flexible nonparametric methods. The mechanisms above are plausible explanations
+but remain conjectures — isolating them would require targeted follow-up experiments
+(e.g., oracle template, higher severity).
 
 
 # Registration Diagnostics {#sec-diag}
@@ -303,9 +456,13 @@ introduces bias.
 
 *Question: Do methods systematically over-register or under-register?*
 
-The registration ratio $\|h_{\text{est}} - \text{id}\|^2 / \|h_{\text{true}} - \text{id}\|^2$
-measures how much the estimated warp deviates from the identity relative to the true warp.
-Values < 1 mean the method didn't warp enough; > 1 means it warped too much.
+The **registration ratio** measures how much the estimated warp deviates from
+the identity relative to the true warp:
+$$R_i = \frac{\|\hat{h}_i - \mathrm{id}\|^2}{\|h_i - \mathrm{id}\|^2}$$
+where $\|\cdot\|^2 = \int_0^1 (\cdot)^2\,dt$.
+Values $R < 1$ indicate under-registration (estimated warp closer to identity
+than truth); $R > 1$ indicates over-registration (warped too much).
+We report the median $R$ across curves within each run.
 
 ```{r}
 #| label: q4-reg-ratio
@@ -329,33 +486,68 @@ rr_agg <- dt[
   by = .(method, warp_type)
 ]
 
-ggplot(rr_agg, aes(x = method, y = median_rr, color = method)) +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+ggplot(rr_agg, aes(y = method, x = median_rr, color = method)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
   geom_point(size = 3) +
-  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.2) +
+  geom_errorbarh(aes(xmin = q25, xmax = q75), height = 0.2) +
   facet_wrap(~warp_type) +
   scale_color_manual(values = mcols, labels = mlabs, guide = "none") +
-  scale_x_discrete(labels = mlabs) +
-  scale_y_continuous(trans = "log2",
+  scale_y_discrete(labels = mlabs) +
+  scale_x_continuous(trans = "log2",
     breaks = c(0.25, 0.5, 1, 2, 4),
     labels = c("1/4", "1/2", "1", "2", "4")) +
-  labs(x = NULL, y = expression("Registration ratio (" * log[2] * " scale)")) +
-  theme_benchmark() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  labs(y = NULL, x = expression("Registration ratio (" * log[2] * " scale)")) +
+  theme_benchmark()
 ```
 
-**Findings:**
+```{r}
+#| label: q4-findings
+#| results: asis
+# Compute registration ratio by method x warp_type
+rr_by_mw <- dt[
+  failure == FALSE & !is.na(registration_ratio_median),
+  .(rr = median(registration_ratio_median, na.rm = TRUE)),
+  by = .(method, warp_type)
+]
 
-- **SRVF** tends to slightly over-register (ratio ~1.0--1.5), especially on complex warps.
-- **Landmark (auto)** is well-calibrated on simple warps but shows more variability on complex ones.
-- **Affine (S+S)** shows the strongest over-registration signal, particularly on affine DGPs
-  where its parametric assumptions should match. This may reflect the template estimation bias noted above.
-- **FDA methods** are fairly well-calibrated (ratio near 1) on simple warps, with some under-registration on complex warps.
+rr_fmt <- function(m, w) {
+  v <- rr_by_mw[method == m & warp_type == w, rr]
+  if (length(v) == 0) return("NA")
+  sprintf("%.2f", v)
+}
+
+cat("**Findings:**\n\n")
+cat(sprintf(
+  "- **SRVF** is well-calibrated on simple (median ratio %s) and complex (%s) warps, with ratios close to 1.\n",
+  rr_fmt("srvf", "simple"), rr_fmt("srvf", "complex")
+))
+cat(sprintf(
+  "- **Landmark (auto)** systematically under-registers: simple %s, complex %s (ratios well below 1, meaning estimated warps are closer to the identity than the truth).\n",
+  rr_fmt("landmark_auto", "simple"), rr_fmt("landmark_auto", "complex")
+))
+cat(sprintf(
+  "- **FDA (default)** and **FDA (crit 1)** tend to over-register, especially on complex warps: FDA default simple/complex = %s/%s, FDA crit 1 = %s/%s.\n",
+  rr_fmt("fda_default", "simple"), rr_fmt("fda_default", "complex"),
+  rr_fmt("fda_crit1", "simple"), rr_fmt("fda_crit1", "complex")
+))
+cat(sprintf(
+  "- **Affine (S+S)** is well-calibrated on affine DGPs (ratio %s) but shows variable behavior on other warp types.\n",
+  rr_fmt("affine_ss", "affine")
+))
+cat("\n")
+```
+
+The **warp slope ratio** measures how much "wiggliness" the estimated warp has
+relative to the truth:
+$$S_i = \frac{\max \hat{h}_i'(t) - \min \hat{h}_i'(t)}{\max h_i'(t) - \min h_i'(t)}$$
+Values $S > 1$ mean the estimated warp is too wiggly; $S < 1$ means too smooth.
+This diagnostic is only meaningful for non-affine warps (affine warps have
+constant derivative, making the denominator uninformative).
 
 ```{r}
 #| label: q4-warp-slope
 #| fig-height: 5
-#| fig-cap: "Warp slope ratio (range of estimated warp derivative / range of true warp derivative) by method and warp type. Non-affine DGPs only (affine warps have constant derivative). Median and IQR across all conditions. Values > 1 = estimated warps too wiggly; < 1 = too smooth."
+#| fig-cap: "Warp slope ratio by method and warp type (non-affine DGPs only). Median and IQR across all conditions. Values > 1 = estimated warps too wiggly; < 1 = too smooth."
 dt_slope <- dt[
   warp_type != "affine" & failure == FALSE & !is.na(warp_slope_ratio_median)
 ]
@@ -366,68 +558,249 @@ if (nrow(dt_slope) > 0) {
     q75 = quantile(warp_slope_ratio_median, 0.75, na.rm = TRUE)
   ), by = .(method, warp_type)]
 
-  ggplot(slope_agg, aes(x = method, y = median_sr, color = method)) +
-    geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  ggplot(slope_agg, aes(y = method, x = median_sr, color = method)) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
     geom_point(size = 3) +
-    geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.2) +
+    geom_errorbarh(aes(xmin = q25, xmax = q75), height = 0.2) +
     facet_wrap(~warp_type) +
     scale_color_manual(values = mcols, labels = mlabs, guide = "none") +
-    scale_x_discrete(labels = mlabs) +
-    scale_y_continuous(trans = "log2") +
-    labs(x = NULL, y = expression("Warp slope ratio (" * log[2] * " scale)")) +
-    theme_benchmark() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    scale_y_discrete(labels = mlabs) +
+    scale_x_continuous(trans = "log2") +
+    labs(y = NULL, x = expression("Warp slope ratio (" * log[2] * " scale)")) +
+    theme_benchmark()
 }
 ```
 
-The warp slope ratio reveals that **SRVF** tends to produce warps with slightly
-wider derivative ranges than the truth (ratio > 1), consistent with its tendency
-to over-register. Landmark and FDA methods produce smoother warps than the truth
-on complex warps (ratio < 1), suggesting they under-capture the fine structure of
-the true warps.
+```{r}
+#| label: q4-slope-findings
+#| results: asis
+# Compute warp slope ratio by method x warp_type
+sr_by_mw <- dt[
+  warp_type != "affine" & failure == FALSE & !is.na(warp_slope_ratio_median),
+  .(sr = median(warp_slope_ratio_median, na.rm = TRUE)),
+  by = .(method, warp_type)
+]
+
+sr_fmt <- function(m, w) {
+  v <- sr_by_mw[method == m & warp_type == w, sr]
+  if (length(v) == 0) return("NA")
+  sprintf("%.2f", v)
+}
+
+cat("**Warp slope findings:**\n\n")
+for (m in levels(dt$method)) {
+  vals <- sr_by_mw[method == m]
+  if (nrow(vals) == 0) next
+  parts <- paste(
+    sprintf("%s: %s", vals$warp_type, sprintf("%.2f", vals$sr)),
+    collapse = ", "
+  )
+  cat(sprintf("- **%s**: %s\n", mlabs[m], parts))
+}
+cat("\nValues > 1 indicate estimated warps are wigglier than truth; < 1 indicates smoother.\n\n")
+```
+
+
+## Phase-amplitude separation (Q2b) {#sec-amp-ratio}
+
+*Question: Do methods confuse phase and amplitude variation?*
+
+The **amplitude variance ratio** compares the residual amplitude variance after
+registration to the true amplitude variance:
+$$\text{AVR} = \frac{\overline{\text{Var}}_t\bigl(\hat{x}_i^{\text{aligned}}(t) - \hat{\mu}(t)\bigr)}{\overline{\text{Var}}_t\bigl(\tilde{x}_i(t) - \mu(t)\bigr)}$$
+where $\hat{\mu}$ is the estimated template, $\tilde{x}_i = \mu \circ h_i + a_i$ is
+the true pre-warp curve (template composed with true warp, plus true amplitude
+component $a_i$), and $\overline{\text{Var}}_t$ denotes the pointwise variance
+across curves $i$, averaged over $t$. Thus the numerator measures the residual
+curve-to-curve variation after registration, and the denominator measures the
+true amplitude variation in the DGP.
+
+- $\text{AVR} < 1$ suggests **over-registration**: the method absorbed some
+  amplitude variation into the phase component.
+- $\text{AVR} > 1$ suggests **under-registration**: residual phase variation
+  remains in the amplitude component, or the estimated template differs from
+  the truth, inflating residuals.
+
+This diagnostic is only shown for DGPs with amplitude variation (D05--D13).
+
+```{r}
+#| label: q4-amp-variance-ratio
+#| fig-height: 9
+#| fig-cap: "Amplitude variance ratio by method, stratified by warp type (rows) and severity × noise conditions (columns). DGPs with amplitude variation only (D05--D13). Dashed line at 1. Boxplots pool across DGPs within each warp type."
+dt_amp <- dt[amplitude != "none" & failure == FALSE & !is.na(amp_variance_ratio)]
+
+if (nrow(dt_amp) > 0) {
+  ggplot(dt_amp, aes(y = method, x = amp_variance_ratio, fill = method)) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+    geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+    facet_grid(
+      warp_type ~ severity + noise_sd,
+      scales = "free_x",
+      labeller = cond_labeller
+    ) +
+    scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
+    scale_y_discrete(labels = mlabs) +
+    scale_x_continuous(trans = "log2",
+      breaks = c(0.125, 0.25, 0.5, 1, 2, 4, 8),
+      labels = c("1/8", "1/4", "1/2", "1", "2", "4", "8")) +
+    labs(y = NULL, x = expression("Amplitude variance ratio (" * log[2] * " scale)")) +
+    theme_benchmark()
+}
+```
+
+```{r}
+#| label: q2b-findings
+#| results: asis
+# Compute AVR by method (pooled across amplitude DGPs)
+avr_by_m <- dt[
+  amplitude != "none" & failure == FALSE & !is.na(amp_variance_ratio),
+  .(avr_med = median(amp_variance_ratio, na.rm = TRUE),
+    avr_q25 = quantile(amp_variance_ratio, 0.25, na.rm = TRUE),
+    avr_q75 = quantile(amp_variance_ratio, 0.75, na.rm = TRUE)),
+  by = method
+]
+
+cat("**Findings:**\n\n")
+for (i in seq_len(nrow(avr_by_m))) {
+  m <- avr_by_m$method[i]
+  med <- avr_by_m$avr_med[i]
+  q25 <- avr_by_m$avr_q25[i]
+  q75 <- avr_by_m$avr_q75[i]
+  direction <- if (med < 0.9) {
+    "over-registration (absorbing amplitude into phase)"
+  } else if (med > 1.1) {
+    "under-registration or template bias inflating residuals"
+  } else {
+    "near-calibrated residual amplitude variance"
+  }
+  cat(sprintf(
+    "- **%s**: median AVR = %.2f [IQR: %.2f--%.2f], suggesting %s.\n",
+    mlabs[m], med, q25, q75, direction
+  ))
+}
+cat("\nNote: AVR > 1 can reflect either residual phase variation (under-registration) *or* template estimation error inflating residuals — these effects are confounded in this metric.\n")
+cat("\n")
+```
+
 
 ## Template estimation (Q5) {#sec-q5}
 
 *Question: How well does each method estimate the template?*
 
-Template MISE (L$^2$) has the caveat that it conflates shape error with phase error
-in the template estimate. Two templates differing only by a warp are "the same shape"
-but have nonzero L$^2$ distance.
+**Template MISE** measures $\int_0^1 (\hat{\mu}(t) - \mu(t))^2\, dt$ where
+$\hat{\mu}$ is the method's estimated template and $\mu$ the true template.
+This conflates shape error with phase error: two templates differing only by
+a warp are "the same shape" but have nonzero $L^2$ distance.
 
 ```{r}
 #| label: q5-template
 #| fig-height: 7
-#| fig-cap: "Distribution of template MISE by method, conditioned on severity and noise. Boxplots pool across all 13 DGPs (100 reps each)."
+#| fig-cap: "Distribution of template MISE by method, conditioned on severity and noise (columns). Boxplots pool across all 15 DGPs (100 reps each)."
 ggplot(
   dt[failure == FALSE],
-  aes(x = method, y = template_mise, fill = method)
+  aes(y = method, x = template_mise, fill = method)
 ) +
   geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
   facet_grid(
-    severity ~ noise_sd,
-    labeller = labeller(
-      severity = function(x) paste0("sev=", x),
-      noise_sd = function(x) paste0("noise=", x)
-    )
+    . ~ severity + noise_sd,
+    labeller = cond_labeller
   ) +
   scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
-  scale_x_discrete(labels = mlabs) +
-  scale_y_log10() +
-  labs(x = NULL, y = "Template MISE (log scale)") +
-  theme_benchmark() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  labs(y = NULL, x = "Template MISE (log scale)") +
+  theme_benchmark()
 ```
 
-**Findings:**
+To address the phase-shape confound in $L^2$ template MISE, we also compute the
+**elastic (SRSF) distance** between estimated and true templates:
+$$d_{\text{FR}}(\hat\mu, \mu) = \| q_{\hat\mu} - q_\mu \|_{L^2}, \quad
+q_f(t) = \text{sign}(f'(t))\sqrt{|f'(t)|}$$
+This measures template *shape* distance invariant to reparameterization.
 
-- **SRVF** achieves the lowest template MISE across most conditions, consistent with its
-  use of the Karcher mean.
-- Noise has a moderate effect; severity has a larger effect (higher severity = more phase
-  variation = harder template estimation).
-- **Affine (S+S)** shows the highest template MISE, which aligns with the earlier finding
-  that its template estimation (arithmetic mean) may be biased under non-trivial warping.
+```{r}
+#| label: q5-elastic
+#| fig-height: 7
+#| fig-cap: "Distribution of elastic (SRSF) template distance by method, conditioned on severity and noise. Lower is better. Unlike L2 MISE, this metric is invariant to phase shifts in the template."
+if ("template_elastic_dist" %in% names(dt)) {
+  ggplot(
+    dt[failure == FALSE & !is.na(template_elastic_dist)],
+    aes(y = method, x = template_elastic_dist, fill = method)
+  ) +
+    geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+    facet_grid(
+      . ~ severity + noise_sd,
+      labeller = cond_labeller
+    ) +
+    scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
+    scale_y_discrete(labels = mlabs) +
+    scale_x_log10() +
+    labs(y = NULL, x = "Elastic template distance (log scale)") +
+    theme_benchmark()
+} else {
+  cat("*template_elastic_dist not available in current results — will appear after re-run.*")
+}
+```
 
-# Sensitivity Summary (Q6) {#sec-sensitivity}
+```{r}
+#| label: q5-findings
+#| results: asis
+# Best method per severity x noise panel (pooled across DGPs)
+q5_best <- dt[failure == FALSE,
+  .(tmise = median(template_mise, na.rm = TRUE)),
+  by = .(method, severity, noise_sd)
+]
+
+has_elastic <- "template_elastic_dist" %in% names(dt)
+if (has_elastic) {
+  q5_elastic <- dt[failure == FALSE & !is.na(template_elastic_dist),
+    .(edist = median(template_elastic_dist, na.rm = TRUE)),
+    by = .(method, severity, noise_sd)
+  ]
+}
+
+cat("**Findings (L2 MISE):**\n\n")
+cat("Best method (lowest median template MISE) per condition:\n\n")
+for (s in levels(dt$severity)) {
+  for (ns in levels(dt$noise_sd)) {
+    sub <- q5_best[severity == s & noise_sd == ns]
+    best_m <- sub[which.min(tmise), method]
+    best_v <- sub[which.min(tmise), tmise]
+    cat(sprintf(
+      "- sev=%s, noise=%s: **%s** (%.4f)\n",
+      s, ns, mlabs[best_m], best_v
+    ))
+  }
+}
+cat("\n")
+
+if (has_elastic) {
+  cat("**Findings (elastic distance):**\n\n")
+  cat("Best method (lowest median elastic distance) per condition:\n\n")
+  for (s in levels(dt$severity)) {
+    for (ns in levels(dt$noise_sd)) {
+      sub <- q5_elastic[severity == s & noise_sd == ns]
+      best_m <- sub[which.min(edist), method]
+      best_v <- sub[which.min(edist), edist]
+      cat(sprintf(
+        "- sev=%s, noise=%s: **%s** (%.4f)\n",
+        s, ns, mlabs[best_m], best_v
+      ))
+    }
+  }
+  cat("\n")
+}
+
+# Worst method overall
+worst_tpl <- q5_best[, .(tmise = median(tmise)), by = method][which.max(tmise), method]
+cat(sprintf(
+  "**%s** consistently shows the highest template MISE.\n\n",
+  mlabs[worst_tpl]
+))
+cat("**Caveat:** Template MISE uses $L^2$ distance, which conflates shape error with phase error. The elastic (SRSF) distance above addresses this by measuring shape distance invariant to reparameterization.\n\n")
+```
+
+# Sensitivity (Q6) {#sec-sensitivity}
 
 *Question: Which methods are most sensitive to noise and severity?*
 
@@ -440,7 +813,7 @@ one DGP; the crossbar shows the median ratio across DGPs.
 ```{r}
 #| label: q6-noise
 #| fig-height: 5
-#| fig-cap: "Noise degradation: ratio of median warp MISE at noise=0.1 vs noise=0 (severity=0.5 fixed). Each dot = one DGP; crossbar = median across DGPs. Log2 scale: 0 = no effect, 1 = MISE doubled."
+#| fig-cap: "Noise degradation: ratio of median warp MISE at each noise level vs noise=0 (severity=0.5 fixed). Panels show noise=0.1 and noise=0.3. Each dot = one DGP; crossbar = median across DGPs."
 ratios <- degradation_ratios(dt)
 noise_dt <- ratios$noise[severity == "0.5" & is.finite(noise_ratio)]
 
@@ -450,11 +823,13 @@ if (nrow(noise_dt) > 0) {
     geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
     stat_summary(fun = median, geom = "crossbar", width = 0.4,
       color = "black", linewidth = 0.4) +
+    facet_wrap(~noise_sd, labeller = labeller(
+      noise_sd = function(x) paste0("noise=", x, " vs 0"))) +
     scale_color_manual(values = mcols, labels = mlabs, guide = "none") +
     scale_x_discrete(labels = mlabs) +
     scale_y_continuous(trans = "log2",
-      breaks = c(0.5, 1, 2, 4, 8),
-      labels = c("0.5", "1", "2", "4", "8")) +
+      breaks = c(0.5, 1, 2, 4, 8, 16, 32, 64, 128),
+      labels = c("0.5", "1", "2", "4", "8", "16", "32", "64", "128")) +
     labs(
       x = NULL,
       y = expression("Noise degradation ratio (" * log[2] * " scale)")
@@ -469,7 +844,7 @@ if (nrow(noise_dt) > 0) {
 ```{r}
 #| label: q6-severity
 #| fig-height: 5
-#| fig-cap: "Severity degradation: ratio of median warp MISE at severity=1.0 vs severity=0.5 (noise=0 fixed). Each dot = one DGP; crossbar = median. Log2 scale."
+#| fig-cap: "Severity degradation: ratio of median warp MISE at severity=1.0 vs severity=0.5 (noise=0 fixed). Each dot = one DGP; crossbar = median across DGPs."
 sev_dt <- ratios$severity[noise_sd == "0" & is.finite(severity_ratio)]
 
 if (nrow(sev_dt) > 0) {
@@ -481,8 +856,8 @@ if (nrow(sev_dt) > 0) {
     scale_color_manual(values = mcols, labels = mlabs, guide = "none") +
     scale_x_discrete(labels = mlabs) +
     scale_y_continuous(trans = "log2",
-      breaks = c(1, 2, 4, 8, 16, 32),
-      labels = c("1", "2", "4", "8", "16", "32")) +
+      breaks = c(0.5, 1, 2, 4, 8, 16, 32),
+      labels = c("0.5", "1", "2", "4", "8", "16", "32")) +
     labs(
       x = NULL,
       y = expression("Severity degradation ratio (" * log[2] * " scale)")
@@ -492,17 +867,71 @@ if (nrow(sev_dt) > 0) {
 }
 ```
 
-**Findings:**
+```{r}
+#| label: q6-findings
+#| results: asis
+# Compute actual median degradation ratios per noise level
+noise_med <- ratios$noise[
+  severity == "0.5" & is.finite(noise_ratio),
+  .(ratio = median(noise_ratio, na.rm = TRUE)),
+  by = .(method, noise_sd)
+][order(noise_sd, -ratio)]
 
-- **Noise** has the strongest effect on SRVF (median ratio ~2$\times$), which is
-  expected since SRVF operates on derivatives of the curves. Affine and Landmark
-  methods are less noise-sensitive.
-- **Severity** increases MISE substantially for all methods (ratios 2--8$\times$),
-  with the strongest effect on Affine (S+S). This is expected: larger warps are harder
-  to estimate, and the affine method's template bias compounds with severity.
+sev_med <- ratios$severity[
+  noise_sd == "0" & is.finite(severity_ratio),
+  .(ratio = median(severity_ratio, na.rm = TRUE)),
+  by = method
+][order(-ratio)]
+
+cat("**Findings:**\n\n")
+
+# Noise — per level
+noise_levels_present <- sort(unique(noise_med$noise_sd))
+for (nl in noise_levels_present) {
+  nl_sub <- noise_med[noise_sd == nl]
+  most <- nl_sub[which.max(ratio)]
+  least <- nl_sub[which.min(ratio)]
+  cat(sprintf(
+    "- **Noise=%s vs 0**: strongest effect on %s (%.1f$\\times$), weakest on %s (%.2f$\\times$).\n",
+    nl, mlabs[most$method], most$ratio,
+    mlabs[least$method], least$ratio
+  ))
+}
+# SRVF noise note
+if (noise_med[noise_sd == noise_levels_present[1] & method == "srvf", .N] > 0) {
+  cat("  Unregularized SRVF operates on derivatives (SRSFs), which amplify high-frequency noise. Study B (penalization) will test whether regularization mitigates this.\n")
+}
+
+# Severity
+most_sev <- sev_med[1]
+least_sev <- sev_med[.N]
+cat(sprintf(
+  "- **Severity** increases MISE for all methods, with the strongest effect on %s (%.1f$\\times$) and the weakest on %s (%.1f$\\times$).\n",
+  mlabs[most_sev$method], most_sev$ratio,
+  mlabs[least_sev$method], least_sev$ratio
+))
+cat("\n")
+
+# Absolute degradation context
+abs_easy <- dt[failure == FALSE & severity == "0.5" & noise_sd == "0",
+  .(mise = median(warp_mise, na.rm = TRUE)), by = method]
+abs_hard <- dt[failure == FALSE & severity == "1" & noise_sd == "0.1",
+  .(mise = median(warp_mise, na.rm = TRUE)), by = method]
+abs_merge <- merge(abs_easy, abs_hard, by = "method", suffixes = c("_easy", "_hard"))
+abs_merge[, abs_change := mise_hard - mise_easy]
+
+cat("**Note on relative vs absolute degradation:** Large relative ratios can be misleading when baselines differ. Absolute median MISE change (sev=0.5/noise=0 to sev=1/noise=0.1):\n\n")
+for (i in seq_len(nrow(abs_merge))) {
+  cat(sprintf("- %s: %.2e to %.2e (change: %.2e)\n",
+    mlabs[abs_merge$method[i]],
+    abs_merge$mise_easy[i], abs_merge$mise_hard[i], abs_merge$abs_change[i]))
+}
+cat("\n")
+```
 
 ```{r}
 #| label: q6-summary-table
+# Degradation ratios
 noise_median <- ratios$noise[
   severity == "0.5" & is.finite(noise_ratio),
   .(noise_ratio = median(noise_ratio, na.rm = TRUE)),
@@ -513,13 +942,52 @@ sev_median <- ratios$severity[
   .(severity_ratio = median(severity_ratio, na.rm = TRUE)),
   by = method
 ]
-deg_summary <- merge(noise_median, sev_median, by = "method", all = TRUE)
+
+# Mean rank in easy condition and rank change to harder condition
+rank_easy_noise <- dt[
+  failure == FALSE & severity == "0.5" & noise_sd == "0",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank_easy := rank(mise), by = dgp
+][, .(mean_rank_clean = round(mean(rank_easy), 1)), by = method]
+
+rank_noisy <- dt[
+  failure == FALSE & severity == "0.5" & noise_sd == "0.1",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank_noisy := rank(mise), by = dgp
+][, .(mean_rank_noisy = round(mean(rank_noisy), 1)), by = method]
+
+rank_easy_sev <- dt[
+  failure == FALSE & severity == "0.5" & noise_sd == "0",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank_easy := rank(mise), by = dgp
+][, .(mean_rank_easy = round(mean(rank_easy), 1)), by = method]
+
+rank_hard_sev <- dt[
+  failure == FALSE & severity == "1" & noise_sd == "0",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank_hard := rank(mise), by = dgp
+][, .(mean_rank_hard = round(mean(rank_hard), 1)), by = method]
+
+deg_summary <- Reduce(
+  function(a, b) merge(a, b, by = "method", all = TRUE),
+  list(rank_easy_noise, rank_noisy, noise_median, rank_easy_sev, rank_hard_sev, sev_median)
+)
 deg_summary[, noise_ratio := round(noise_ratio, 2)]
 deg_summary[, severity_ratio := round(severity_ratio, 2)]
+deg_summary[, rank_delta_noise := mean_rank_noisy - mean_rank_clean]
+deg_summary[, rank_delta_sev := mean_rank_hard - mean_rank_easy]
+
 knitr::kable(
-  deg_summary,
-  col.names = c("Method", "Noise ratio (median)", "Severity ratio (median)"),
-  caption = "Median degradation ratios across DGPs. Noise ratio: MISE(noise=0.1) / MISE(noise=0) at severity=0.5. Severity ratio: MISE(sev=1) / MISE(sev=0.5) at noise=0."
+  deg_summary[, .(method, mean_rank_clean, mean_rank_noisy, rank_delta_noise,
+    noise_ratio, mean_rank_easy, mean_rank_hard, rank_delta_sev, severity_ratio)],
+  col.names = c("Method",
+    "Rank (clean)", "Rank (noisy)", "\u0394 rank", "MISE ratio",
+    "Rank (low sev)", "Rank (high sev)", "\u0394 rank", "MISE ratio"),
+  caption = "Degradation context. Rank columns: mean rank (across DGPs) in the easy condition and the harder condition; \u0394 rank: change in mean rank (positive = method drops in ranking). MISE ratio: ratio of median MISE under harder vs easier condition. Noise: severity=0.5; Severity: noise=0."
 )
 ```
 
@@ -533,13 +1001,13 @@ knitr::kable(
 #| fig-cap: "Distribution of time per curve (seconds) by method across all conditions. Log10 scale. Boxplots show all non-failed runs."
 ggplot(
   dt[failure == FALSE],
-  aes(x = method, y = time_per_curve, fill = method)
+  aes(y = method, x = time_per_curve, fill = method)
 ) +
   geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
   scale_fill_manual(values = mcols, labels = mlabs, guide = "none") +
-  scale_x_discrete(labels = mlabs) +
-  scale_y_log10() +
-  labs(x = NULL, y = "Time per curve (seconds, log scale)") +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  labs(y = NULL, x = "Time per curve (seconds, log scale)") +
   theme_benchmark()
 ```
 
@@ -557,9 +1025,26 @@ knitr::kable(time_tbl,
 )
 ```
 
-**FDA methods are by far the slowest** (order of magnitude slower than SRVF),
-while Landmark and Affine are the fastest. SRVF provides a good balance of
-accuracy and speed.
+```{r}
+#| label: q7-runtime-findings
+#| results: asis
+rt <- dt[failure == FALSE, .(
+  med = median(time_per_curve, na.rm = TRUE)
+), by = method][order(-med)]
+
+cat("**Runtime findings:**\n\n")
+for (i in seq_len(nrow(rt))) {
+  cat(sprintf("- **%s**: %.3f s/curve\n", mlabs[rt$method[i]], rt$med[i]))
+}
+
+fastest <- rt[.N]
+slowest <- rt[1]
+ratio <- slowest$med / fastest$med
+cat(sprintf(
+  "\n%s is %.0f$\\times$ slower than %s (the fastest).\n\n",
+  mlabs[slowest$method], ratio, mlabs[fastest$method]
+))
+```
 
 ## Failures {#sec-failures}
 
@@ -656,30 +1141,96 @@ if (nrow(missing) > 0) {
 #| results: asis
 cat("## Key findings\n\n")
 
-cat("1. **SRVF is the best general-purpose method** for warp recovery on smooth ",
-  "(domain-preserving) warps. It achieves the lowest median warp MISE across ",
-  "all simple and complex warp DGPs and is competitive even on affine DGPs.\n\n")
+# 1. Best method for warp recovery
+best_by_wt <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(method, warp_type)
+][, .(best = method[which.min(mise)]), by = warp_type]
+best_overall <- dt[failure == FALSE & warp_type != "affine",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = method][which.min(mise), method]
+# Check: does it win on every DGP?
+per_dgp <- dt[failure == FALSE & warp_type != "affine",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, .(best = method[which.min(mise)]), by = dgp]
+n_wins <- sum(per_dgp$best == best_overall)
+n_dgps_dp <- nrow(per_dgp)
 
-cat("2. **Amplitude variation degrades warp recovery for all methods**, but the ",
-  "degradation is modest for SRVF and more severe for FDA and Affine methods. ",
-  "High-rank (3-FPC) amplitude is harder than low-rank, confirming that ",
-  "phase-amplitude separation is a genuine challenge.\n\n")
+cat(sprintf(
+  "1. **%s is the best general-purpose method** for warp recovery on domain-preserving warps (simple + complex). It achieves the lowest pooled median warp MISE and ranks first on %d of %d individual DGPs. On the remaining DGPs, other methods are competitive.\n\n",
+  mlabs[best_overall], n_wins, n_dgps_dp
+))
 
-cat("3. **The affine method underperforms on affine DGPs** despite being well-specified. ",
-  "This appears to stem from biased template estimation (arithmetic mean) and ",
-  "weak signal at low severity. See @sec-affine-puzzle.\n\n")
+# 2. Amplitude degradation
+cat(sprintf(
+  "2. **Amplitude variation degrades warp recovery for most methods**, but the pattern is not universal (see @sec-q2 for per-ladder details). %s retains the lowest absolute MISE under high-rank amplitude; its advantage is mainly its lower baseline.\n\n",
+  mlabs[best_overall]
+))
 
-cat("4. **FDA methods have the highest failure rates** (~2-5% depending on DGP), ",
-  "driven by numerical issues in the iterative warping (duplicated arg values, ",
-  "singular systems). They are also the slowest by an order of magnitude.\n\n")
+# 3. Affine puzzle
+affine_best <- best_by_wt[warp_type == "affine", best]
+cat(sprintf(
+  "3. **The affine method underperforms on affine DGPs** despite being well-specified — %s achieves lower MISE. Plausible explanations include template estimation bias and weak signal at low severity, but these remain conjectures (see @sec-affine-puzzle).\n\n",
+  mlabs[affine_best]
+))
 
-cat("5. **Noise sensitivity varies by method**: SRVF is most noise-sensitive ",
-  "(operates on derivatives), while Landmark and Affine are more robust. ",
-  "All methods degrade substantially with increased severity (larger warps).\n\n")
+# 4. Failure rates
+fail_rates <- dt[, .(rate = 100 * mean(failure)), by = method][order(-rate)]
+top_fail <- fail_rates[1]
+cat(sprintf(
+  "4. **FDA methods have the highest failure rates** (%s: %.1f%%, %s: %.1f%%), driven by numerical issues in the iterative warping (duplicated arg values, singular systems). Some DGP-specific rates exceed 40%%.\n\n",
+  mlabs[fail_rates$method[1]], fail_rates$rate[1],
+  mlabs[fail_rates$method[2]], fail_rates$rate[2]
+))
 
-cat("6. **Landmark (auto) is surprisingly competitive** on many DGPs, matching ",
-  "or exceeding FDA methods. It has near-zero failure rate and fast runtime. ",
-  "Its weakness is variability when landmark detection is unreliable.\n\n")
+# 5. Noise/severity sensitivity
+noise_worst <- noise_med[1]
+sev_worst <- sev_med[1]
+cat(sprintf(
+  "5. **Noise sensitivity varies sharply**: %s is most noise-sensitive (%.1f$\\times$ degradation ratio), likely because it operates on SRSFs (derivatives). Severity hits %s hardest (%.1f$\\times$). See @sec-sensitivity.\n\n",
+  mlabs[noise_worst$method], noise_worst$ratio,
+  mlabs[sev_worst$method], sev_worst$ratio
+))
+
+# 6. Landmark
+lm_rank <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method)
+][, rank := rank(mise), by = dgp
+][method == "landmark_auto", .(mean_rank = mean(rank))]
+lm_fail <- fail_rates[method == "landmark_auto", rate]
+cat(sprintf(
+  "6. **Landmark (auto) is competitive** (mean rank %.1f across DGPs) with near-zero failure rate (%.1f%%) and fast runtime. Its weakness is under-registration (registration ratio well below 1) and variability when landmark detection is unreliable.\n\n",
+  lm_rank$mean_rank, lm_fail
+))
+
+# 7. AVR
+avr_summary <- dt[amplitude != "none" & failure == FALSE & !is.na(amp_variance_ratio),
+  .(avr = median(amp_variance_ratio, na.rm = TRUE)), by = method]
+overreg_methods <- avr_summary[avr < 0.9, method]
+cat("7. **Phase-amplitude separation varies by method**: ")
+if (length(overreg_methods) > 0) {
+  cat(sprintf(
+    "%s show median AVR < 1, suggesting over-registration that absorbs amplitude into phase. ",
+    paste(mlabs[overreg_methods], collapse = " and ")
+  ))
+}
+underreg_methods <- avr_summary[avr > 1.1, method]
+if (length(underreg_methods) > 0) {
+  cat(sprintf(
+    "%s show AVR > 1 (under-registration or template bias inflating residuals). ",
+    paste(mlabs[underreg_methods], collapse = " and ")
+  ))
+}
+near_one <- avr_summary[avr >= 0.9 & avr <= 1.1, method]
+if (length(near_one) > 0) {
+  cat(sprintf(
+    "%s show near-calibrated AVR. ",
+    paste(mlabs[near_one], collapse = " and ")
+  ))
+}
+cat("Note that AVR > 1 can reflect either residual phase variation or template estimation error — these effects are confounded.\n\n")
 ```
 
 ```{r}

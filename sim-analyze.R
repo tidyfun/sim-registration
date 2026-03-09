@@ -3,19 +3,21 @@
 # Provides:
 #   load_study_a()        - Load and annotate Study A results
 #   dgp_factors()         - DGP factor lookup table
+#   dgp_desc_labels()     - Descriptive DGP labels for plots
 #   mc_summary()          - Aggregation with MC standard errors
 #   amplitude_ladders()   - Paired DGP comparison ladders for Q2
 #   warp_ladders()        - Paired DGP comparison ladders for Q3
 #   degradation_ratios()  - Noise/severity sensitivity ratios for Q6
-#   make_heatmap()        - DGP x Method heatmap
+#   make_heatmap()        - DGP x Method heatmap (rank-based coloring)
 #   make_ladder_plot()    - Amplitude/warp ladder line plot
 #   make_reg_ratio_plot() - Registration ratio dot plot
-#   make_dgp_gallery()    - Example data visualizations per DGP
+#   make_dgp_example()    - Example data visualizations per DGP
 #
 # Plotting conventions:
-#   - Lighter color = better performance (reversed for MISE-type metrics)
+#   - Heatmaps: rank-based coloring per row (yellow = rank 1, purple = rank 5)
 #   - No scientific notation; round to 3 significant digits
 #   - All ratios on log2 scale
+#   - Horizontal boxplots where method is on the axis (text labels on y)
 
 library(data.table)
 
@@ -41,7 +43,7 @@ fmt <- function(x, digits = 3) {
 
 dgp_factors <- function() {
   data.table(
-    dgp = paste0("D", sprintf("%02d", 1:13)),
+    dgp = paste0("D", sprintf("%02d", 1:15)),
     template = c(
       "harmonic",
       "harmonic",
@@ -55,7 +57,9 @@ dgp_factors <- function() {
       "harmonic",
       "wiggly",
       "wiggly",
-      "wiggly"
+      "wiggly",
+      "wiggly",
+      "harmonic"
     ),
     warp_type = c(
       "simple",
@@ -70,6 +74,8 @@ dgp_factors <- function() {
       "complex",
       "simple",
       "complex",
+      "affine",
+      "simple",
       "affine"
     ),
     amplitude = c(
@@ -85,8 +91,34 @@ dgp_factors <- function() {
       "highrank",
       "highrank",
       "highrank",
+      "highrank",
+      "none",
       "highrank"
     )
+  )
+}
+
+#' Descriptive DGP labels: "D01 (harmonic-simple-none)"
+dgp_desc_labels <- function() {
+  f <- dgp_factors()
+  setNames(
+    paste0(f$dgp, " (", f$template, "-", f$warp_type, "-", f$amplitude, ")"),
+    f$dgp
+  )
+}
+
+#' Short descriptive DGP labels for axis/facet use: "D01\nharm-simp-none"
+dgp_short_labels <- function() {
+  f <- dgp_factors()
+  short_tpl <- ifelse(f$template == "harmonic", "harm", "wigg")
+  short_warp <- c(
+    simple = "simp",
+    complex = "comp",
+    affine = "affi"
+  )[f$warp_type]
+  setNames(
+    paste0(f$dgp, "\n", short_tpl, "-", short_warp, "-", f$amplitude),
+    f$dgp
   )
 }
 
@@ -105,7 +137,7 @@ load_study_a <- function(results_dir = file.path(base_dir, "results")) {
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
 
-  dt[, dgp := factor(dgp, levels = paste0("D", sprintf("%02d", 1:13)))]
+  dt[, dgp := factor(dgp, levels = paste0("D", sprintf("%02d", 1:15)))]
   dt[,
     method := factor(
       method,
@@ -119,17 +151,12 @@ load_study_a <- function(results_dir = file.path(base_dir, "results")) {
     )
   ]
   dt[,
-    warp_type := factor(warp_type, levels = c("simple", "complex", "affine"))
+    warp_type := factor(warp_type, levels = c("affine", "simple", "complex"))
   ]
   dt[,
     amplitude := factor(
       amplitude,
-      levels = c(
-        "none",
-        "rank1",
-        "rank2",
-        "highrank"
-      )
+      levels = c("none", "rank1", "rank2", "highrank")
     )
   ]
   dt[, severity := factor(severity)]
@@ -172,34 +199,41 @@ amplitude_ladders <- function() {
     "harmonic + simple" = c(D01 = "none", D05 = "rank1", D09 = "highrank"),
     "harmonic + complex" = c(D02 = "none", D07 = "rank2", D10 = "highrank"),
     "wiggly + complex" = c(D03 = "none", D08 = "rank2", D12 = "highrank"),
-    "wiggly + simple" = c(D06 = "rank1", D11 = "highrank")
+    "wiggly + simple" = c(D14 = "none", D06 = "rank1", D11 = "highrank")
   )
 }
 
 warp_ladders <- function() {
   list(
-    "harmonic + none" = c(D01 = "simple", D02 = "complex", D04 = "affine"),
-    "harmonic + highrank" = c(D09 = "simple", D10 = "complex"),
-    "wiggly + highrank" = c(D11 = "simple", D12 = "complex", D13 = "affine")
+    "harmonic + none" = c(D04 = "affine", D01 = "simple", D02 = "complex"),
+    "harmonic + highrank" = c(D15 = "affine", D09 = "simple", D10 = "complex"),
+    "wiggly + none" = c(D14 = "simple", D03 = "complex"),
+    "wiggly + highrank" = c(D13 = "affine", D11 = "simple", D12 = "complex")
   )
 }
 
 # --- Degradation Ratios (Q6) -------------------------------------------------
 
 degradation_ratios <- function(dt) {
+  # Noise degradation: ratio of each noisy condition to clean (noise=0)
   noise_agg <- dt[
     failure == FALSE,
     .(warp_mise = median(warp_mise, na.rm = TRUE)),
     by = .(dgp, method, noise_sd, severity)
   ]
-  noise_wide <- dcast(
-    noise_agg,
-    dgp + method + severity ~ noise_sd,
-    value.var = "warp_mise"
+  noise_levels <- setdiff(
+    as.character(sort(unique(noise_agg$noise_sd))),
+    "0"
   )
-  setnames(noise_wide, c("0", "0.1"), c("clean", "noisy"))
-  noise_wide[, noise_ratio := noisy / clean]
+  clean <- noise_agg[
+    noise_sd == "0",
+    .(dgp, method, severity, clean = warp_mise)
+  ]
+  noise_long <- noise_agg[noise_sd != "0"]
+  noise_long <- merge(noise_long, clean, by = c("dgp", "method", "severity"))
+  noise_long[, noise_ratio := warp_mise / clean]
 
+  # Severity degradation
   sev_agg <- dt[
     failure == FALSE,
     .(warp_mise = median(warp_mise, na.rm = TRUE)),
@@ -213,7 +247,7 @@ degradation_ratios <- function(dt) {
   setnames(sev_wide, c("0.5", "1"), c("low_sev", "high_sev"))
   sev_wide[, severity_ratio := high_sev / low_sev]
 
-  list(noise = noise_wide, severity = sev_wide)
+  list(noise = noise_long, severity = sev_wide)
 }
 
 # --- Failure Summary ----------------------------------------------------------
@@ -260,10 +294,17 @@ method_labels <- function() {
   )
 }
 
-# --- Heatmap ------------------------------------------------------------------
+#' Condition labeller for severity × noise facets
+cond_labeller <- ggplot2::labeller(
+  severity = function(x) paste0("sev=", x),
+  noise_sd = function(x) paste0("noise=", x)
+)
 
-#' Heatmap: lighter fill = better. Reversed for MISE (lower is better).
-#' Labels on white rounded rectangles for legibility.
+# --- Heatmap (rank-based coloring) -------------------------------------------
+
+#' Heatmap: rank-based coloring per row.
+#' Yellow (rank 1) = best in row, purple (rank 5) = worst.
+#' Actual median values shown as white labels.
 make_heatmap <- function(dt, metric, label = metric, lower_is_better = TRUE) {
   agg <- dt[
     failure == FALSE,
@@ -272,9 +313,15 @@ make_heatmap <- function(dt, metric, label = metric, lower_is_better = TRUE) {
   ]
   agg[, label_text := fmt(value)]
 
-  fill_dir <- if (lower_is_better) -1 else 1
+  if (lower_is_better) {
+    agg[, rank := rank(value, ties.method = "min"), by = dgp]
+  } else {
+    agg[, rank := rank(-value, ties.method = "min"), by = dgp]
+  }
 
-  ggplot2::ggplot(agg, ggplot2::aes(method, dgp, fill = fill_dir * value)) +
+  dlabs <- dgp_short_labels()
+
+  ggplot2::ggplot(agg, ggplot2::aes(method, dgp, fill = rank)) +
     ggplot2::geom_tile(color = "white", linewidth = 0.5) +
     ggplot2::geom_label(
       ggplot2::aes(label = label_text),
@@ -285,11 +332,73 @@ make_heatmap <- function(dt, metric, label = metric, lower_is_better = TRUE) {
       label.padding = ggplot2::unit(1.5, "pt")
     ) +
     ggplot2::scale_x_discrete(labels = method_labels()) +
+    ggplot2::scale_y_discrete(labels = dlabs) +
     ggplot2::scale_fill_viridis_c(
       option = "plasma",
-      direction = 1,
-      na.value = "grey80",
-      guide = "none"
+      direction = -1,
+      limits = c(1, 5),
+      breaks = 1:5,
+      labels = paste("Rank", 1:5),
+      name = NULL
+    ) +
+    ggplot2::labs(x = NULL, y = NULL, subtitle = label) +
+    theme_benchmark()
+}
+
+# --- Win-Rate Heatmap ---------------------------------------------------------
+
+#' Win-rate heatmap: fraction of runs where each method has the best metric
+#' value for a given DGP (across all severity/noise/rep conditions).
+#' A "win" means rank 1 among the non-failed methods for that specific run.
+make_winrate_heatmap <- function(
+  dt,
+  metric,
+  label = metric,
+  lower_is_better = TRUE
+) {
+  # For each (dgp, severity, noise_sd, rep), rank methods
+  run_dt <- dt[
+    failure == FALSE & !is.na(get(metric)),
+    .(dgp, method, severity, noise_sd, rep, value = get(metric))
+  ]
+  if (lower_is_better) {
+    run_dt[,
+      rnk := rank(value, ties.method = "min"),
+      by = .(dgp, severity, noise_sd, rep)
+    ]
+  } else {
+    run_dt[,
+      rnk := rank(-value, ties.method = "min"),
+      by = .(dgp, severity, noise_sd, rep)
+    ]
+  }
+  run_dt[, win := rnk == 1L]
+
+  winrate <- run_dt[,
+    .(win_pct = 100 * mean(win)),
+    by = .(dgp, method)
+  ]
+  winrate[, label_text := paste0(round(win_pct), "%")]
+
+  dlabs <- dgp_short_labels()
+
+  ggplot2::ggplot(winrate, ggplot2::aes(method, dgp, fill = win_pct)) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.5) +
+    ggplot2::geom_label(
+      ggplot2::aes(label = label_text),
+      size = 2.3,
+      fill = "white",
+      alpha = 0.85,
+      label.size = 0,
+      label.padding = ggplot2::unit(1.5, "pt")
+    ) +
+    ggplot2::scale_x_discrete(labels = method_labels()) +
+    ggplot2::scale_y_discrete(labels = dlabs) +
+    ggplot2::scale_fill_gradient(
+      low = "grey90",
+      high = "#E41A1C",
+      limits = c(0, 100),
+      name = "Win %"
     ) +
     ggplot2::labs(x = NULL, y = NULL, subtitle = label) +
     theme_benchmark()
@@ -335,11 +444,8 @@ make_ladder_plot <- function(
       alpha = 0.5
     ) +
     ggplot2::facet_grid(
-      severity ~ noise_sd,
-      labeller = ggplot2::labeller(
-        severity = function(x) paste0("sev=", x),
-        noise_sd = function(x) paste0("noise=", x)
-      )
+      . ~ severity + noise_sd,
+      labeller = cond_labeller
     ) +
     ggplot2::scale_color_manual(
       values = method_colors(),
@@ -358,6 +464,7 @@ make_ladder_plot <- function(
 # --- Registration Ratio Plot (Q4) --------------------------------------------
 
 make_reg_ratio_plot <- function(dt) {
+  dlabs <- dgp_short_labels()
   agg <- dt[
     failure == FALSE & !is.na(registration_ratio_median),
     .(
@@ -370,31 +477,35 @@ make_reg_ratio_plot <- function(dt) {
 
   ggplot2::ggplot(
     agg[noise_sd == "0" & severity == "0.5"],
-    ggplot2::aes(x = method, y = median_ratio, color = method)
+    ggplot2::aes(y = method, x = median_ratio, color = method)
   ) +
-    ggplot2::geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+    ggplot2::geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
     ggplot2::geom_point(size = 2) +
-    ggplot2::geom_errorbar(
-      ggplot2::aes(ymin = q25, ymax = q75),
-      width = 0.2
+    ggplot2::geom_errorbarh(
+      ggplot2::aes(xmin = q25, xmax = q75),
+      height = 0.2
     ) +
-    ggplot2::facet_wrap(~dgp, nrow = 2) +
+    ggplot2::facet_wrap(
+      ~dgp,
+      nrow = 2,
+      labeller = ggplot2::as_labeller(dlabs)
+    ) +
     ggplot2::scale_color_manual(
       values = method_colors(),
       labels = method_labels()
     ) +
-    ggplot2::scale_x_discrete(labels = method_labels()) +
-    ggplot2::scale_y_continuous(
+    ggplot2::scale_y_discrete(labels = method_labels()) +
+    ggplot2::scale_x_continuous(
       trans = "log2",
       breaks = c(0.25, 0.5, 1, 2, 4),
       labels = c("1/4", "1/2", "1", "2", "4")
     ) +
     ggplot2::labs(
-      y = expression("Registration ratio (" * log[2] * " scale)"),
-      x = NULL
+      x = expression("Registration ratio (" * log[2] * " scale)"),
+      y = NULL
     ) +
     theme_benchmark() +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+    ggplot2::theme(legend.position = "none")
 }
 
 # --- DGP Gallery --------------------------------------------------------------
@@ -430,13 +541,14 @@ make_dgp_example <- function(
     seed = seed
   )
   spec <- dgp_spec(dgp_name)
+  desc <- dgp_desc_labels()[[dgp_name]]
 
   # Template
   tpl_df <- tf_to_df(data$template)
   p_template <- ggplot2::ggplot(tpl_df, ggplot2::aes(arg, value)) +
     ggplot2::geom_line() +
     ggplot2::labs(
-      title = sprintf("%s: %s template", dgp_name, spec$template),
+      title = desc,
       x = "t",
       y = "template"
     ) +

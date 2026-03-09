@@ -4,7 +4,11 @@
 *_files/
 
 # Large result files
+results/**/*.rds
 results/*.rds
+
+# SLURM logs
+logs/
 
 # OS
 .DS_Store
