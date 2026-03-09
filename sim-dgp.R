@@ -262,6 +262,7 @@ generate_amplitude <- function(
 load_gait_fpcs <- function() {
   fpc_file <- file.path(
     here::here(),
+    "data",
     "gait_knee_fpcs.rds"
   )
   if (!file.exists(fpc_file)) {

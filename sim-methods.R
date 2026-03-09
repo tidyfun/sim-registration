@@ -14,8 +14,8 @@ if (requireNamespace("tf", quietly = TRUE)) library(tf) else
 method_configs <- function() {
   list(
     srvf = list(method = "srvf", args = list()),
-    fda_default = list(method = "fda", args = list()),
-    fda_crit1 = list(method = "fda", args = list(crit = 1)),
+    fda_default = list(method = "cc", args = list()),
+    fda_crit1 = list(method = "cc", args = list(crit = 1)),
     affine_ss = list(method = "affine", args = list(type = "shift_scale")),
     landmark_auto = list(method = "landmark", args = list())
   )
@@ -80,7 +80,7 @@ fit_method <- function(
   # Template-based methods: increase Procrustes iterations when estimating
   if (
     !use_true_template &&
-      config$method %in% c("fda", "affine") &&
+      config$method %in% c("cc", "affine") &&
       config_name != "landmark_auto"
   ) {
     call_args$max_iter <- 10L
