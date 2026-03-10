@@ -207,11 +207,117 @@ load_study_b <- function(results_dir = file.path(base_dir, "results")) {
   dt
 }
 
+load_study_c <- function(results_dir = file.path(base_dir, "results")) {
+  files <- list.files(
+    results_dir,
+    pattern = "^results_D\\d+_\\w+_C\\.rds$",
+    full.names = TRUE
+  )
+  if (length(files) == 0) stop("No Study C result files found in ", results_dir)
+
+  dt <- rbindlist(lapply(files, readRDS))
+
+  factors <- dgp_factors()
+  dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
+
+  dt[, dgp := factor(dgp, levels = sort(unique(dgp)))]
+  dt[,
+    method := factor(
+      method,
+      levels = c(
+        "srvf",
+        "fda_default",
+        "fda_crit1",
+        "affine_ss",
+        "landmark_auto"
+      )
+    )
+  ]
+  dt[,
+    warp_type := factor(warp_type, levels = c("affine", "simple", "complex"))
+  ]
+  dt[, n_grid := factor(n_grid)]
+  dt[, noise_sd := factor(noise_sd)]
+
+  message(sprintf(
+    "Loaded %d rows | %d DGPs | %d methods | %d grids | %.1f%% failures",
+    nrow(dt),
+    uniqueN(dt$dgp),
+    uniqueN(dt$method),
+    uniqueN(dt$n_grid),
+    100 * mean(dt$failure, na.rm = TRUE)
+  ))
+  dt
+}
+
+load_study_d <- function(results_dir = file.path(base_dir, "results")) {
+  files <- list.files(
+    results_dir,
+    pattern = "^results_D\\d+_\\w+_D\\.rds$",
+    full.names = TRUE
+  )
+  if (length(files) == 0) stop("No Study D result files found in ", results_dir)
+
+  dt <- rbindlist(lapply(files, readRDS))
+
+  factors <- dgp_factors()
+  dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
+
+  dt[, dgp := factor(dgp, levels = sort(unique(dgp)))]
+  dt[,
+    method := factor(
+      method,
+      levels = c(
+        "srvf",
+        "fda_default",
+        "fda_crit1",
+        "affine_ss",
+        "landmark_auto"
+      )
+    )
+  ]
+  dt[,
+    warp_type := factor(warp_type, levels = c("affine", "simple", "complex"))
+  ]
+  dt[, severity := factor(severity)]
+  dt[, noise_sd := factor(noise_sd)]
+  dt[,
+    template_mode := factor(
+      ifelse(use_true_template, "oracle", "estimated"),
+      levels = c("estimated", "oracle")
+    )
+  ]
+  dt[,
+    condition := factor(
+      ifelse(
+        noise_sd == "0.1" & severity == "0.5",
+        "easy",
+        "hard"
+      ),
+      levels = c("easy", "hard")
+    )
+  ]
+
+  message(sprintf(
+    "Loaded %d rows | %d DGPs | %d methods | %.1f%% failures",
+    nrow(dt),
+    uniqueN(dt$dgp),
+    uniqueN(dt$method),
+    100 * mean(dt$failure, na.rm = TRUE)
+  ))
+  dt
+}
+
 # --- Aggregation with MC SEs -------------------------------------------------
 
 mc_summary <- function(dt, metric, by) {
   metric_chr <- as.character(substitute(metric))
-  dt[
+  # Compute n_fail from unfiltered data, then summarize filtered
+  fail_counts <- dt[,
+    .(n_fail = sum(failure | is.na(get(metric_chr)))),
+    by = by
+  ]
+  result <- dt[
     !is.na(get(metric_chr)) & failure == FALSE,
     .(
       mean = mean(get(metric_chr), na.rm = TRUE),
@@ -220,11 +326,11 @@ mc_summary <- function(dt, metric, by) {
       mc_se = sd(get(metric_chr), na.rm = TRUE) / sqrt(.N),
       q25 = quantile(get(metric_chr), 0.25, na.rm = TRUE),
       q75 = quantile(get(metric_chr), 0.75, na.rm = TRUE),
-      n = .N,
-      n_fail = sum(is.na(get(metric_chr)))
+      n = .N
     ),
     by = by
   ]
+  merge(result, fail_counts, by = by)
 }
 
 # --- Ladders ------------------------------------------------------------------

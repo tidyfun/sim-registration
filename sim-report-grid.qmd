@@ -1,0 +1,408 @@
+---
+title: "Registration Benchmark v2 — Study C: Grid Resolution"
+subtitle: "Internal Report — tf Package"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+    self-contained: true
+execute:
+  cache: true
+  warning: false
+  message: false
+---
+
+# Setup {.unnumbered}
+
+```{r}
+#| label: setup
+#| cache: false
+library(ggplot2)
+library(data.table)
+library(patchwork)
+
+base_dir <- here::here()
+source(file.path(base_dir, "sim-analyze.R"))
+
+mcols <- method_colors()
+mlabs <- method_labels()
+dlabs <- dgp_short_labels()
+```
+
+```{r}
+#| label: load-data
+dt <- load_study_c()
+```
+
+Study C tests whether **grid resolution** is a confound for method comparison.
+SRVF operates on SRSFs (numerical derivatives) which amplify discretization artifacts
+at finer grids. A preliminary pilot (job 5131384) showed SRVF warp MISE 1.82× worse at
+$n_\text{grid}=201$ vs 101.
+
+**Design**: 5 DGPs $\times$ 3 grid sizes (51, 101, 201) $\times$ 3 noise (0, 0.1, 0.3)
+$\times$ 5 methods $\times$ severity=1.0 = 225 cells $\times$ 50 reps = 11,250 runs.
+
+```{r}
+#| label: dgp-table
+dgps_used <- c("D01", "D03", "D04", "D09", "D12")
+knitr::kable(
+  dgp_factors()[dgp %in% dgps_used],
+  caption = "DGPs in Study C: covering both templates, all 3 warp types, and none/highrank amplitude."
+)
+```
+
+# Overview {#sec-overview}
+
+## Failure Rates
+
+```{r}
+#| label: failures
+#| results: asis
+fail_dt <- dt[,
+  .(n_fail = sum(failure), n_total = .N, rate = mean(failure)),
+  by = .(method, n_grid)
+]
+fail_any <- fail_dt[n_fail > 0]
+if (nrow(fail_any) == 0) {
+  cat("No failures across all 11,250 runs.\n\n")
+} else {
+  cat("**Failure rates by method and grid:**\n\n")
+  print(knitr::kable(fail_dt[n_fail > 0]))
+}
+```
+
+## Warp MISE by Grid $\times$ Method
+
+The central question: does grid resolution systematically affect method performance?
+
+```{r}
+#| label: warp-mise-grid-method
+#| fig-height: 7
+#| fig-cap: "Warp MISE by grid size and method, faceted by noise level. Each boxplot pools over all 5 DGPs and 50 reps."
+ggplot(
+  dt[failure == FALSE],
+  aes(y = method, x = warp_mise, fill = n_grid)
+) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2, position = "dodge") +
+  facet_wrap(~noise_sd, labeller = labeller(noise_sd = function(x) paste0("noise=", x))) +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  scale_fill_brewer(palette = "Set2", name = "Grid size") +
+  labs(y = NULL, x = "Warp MISE (log scale)") +
+  theme_benchmark()
+```
+
+# Grid Degradation Ratios {#sec-ratios}
+
+Grid degradation ratios compare each grid size to the baseline $n_\text{grid}=101$.
+Values > 1 mean worse performance at that grid; < 1 means better.
+
+```{r}
+#| label: grid-ratios
+#| fig-height: 8
+#| fig-cap: "Warp MISE ratio relative to grid=101, per method and DGP. Each dot is one DGP; the crossbar shows the median across DGPs. Values > 1 (right of dashed line) indicate degradation."
+ratio_dt <- dt[failure == FALSE,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method, n_grid, noise_sd)
+]
+baseline <- ratio_dt[n_grid == "101", .(dgp, method, noise_sd, base = warp_mise)]
+ratio_dt <- merge(ratio_dt, baseline, by = c("dgp", "method", "noise_sd"))
+ratio_dt[, ratio := warp_mise / base]
+ratio_dt <- ratio_dt[n_grid != "101"]
+
+ggplot(ratio_dt, aes(x = ratio, y = method, color = method)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_jitter(height = 0.15, size = 2, alpha = 0.6) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.4,
+    color = "black", linewidth = 0.4) +
+  facet_grid(n_grid ~ noise_sd,
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise=", x),
+      n_grid = function(x) paste0("grid=", x)
+    )
+  ) +
+  scale_color_manual(values = mcols, guide = "none") +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_continuous(trans = "log2",
+    breaks = c(0.25, 0.5, 1, 2, 4),
+    labels = c("1/4", "1/2", "1", "2", "4")
+  ) +
+  labs(x = expression("Warp MISE ratio vs grid=101 (" * log[2] * " scale)"), y = NULL) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: grid-ratio-findings
+#| results: asis
+# Median ratio per method x grid (pooled over DGPs and noise)
+ratio_summary <- ratio_dt[,
+  .(
+    median_ratio = median(ratio, na.rm = TRUE),
+    min_ratio = min(ratio, na.rm = TRUE),
+    max_ratio = max(ratio, na.rm = TRUE)
+  ),
+  by = .(method, n_grid)
+]
+
+cat("**Warp MISE degradation ratios vs grid=101** (median [min, max] across DGPs and noise levels):\n\n")
+for (g in sort(unique(as.character(ratio_summary$n_grid)))) {
+  cat(sprintf("*Grid = %s:*\n\n", g))
+  sub <- ratio_summary[n_grid == g][order(median_ratio)]
+  for (i in seq_len(nrow(sub))) {
+    cat(sprintf("- **%s**: %.2f [%.2f, %.2f]\n",
+      mlabs[sub$method[i]], sub$median_ratio[i],
+      sub$min_ratio[i], sub$max_ratio[i]))
+  }
+  cat("\n")
+}
+```
+
+# Template MISE by Grid {#sec-template}
+
+```{r}
+#| label: template-mise-grid
+#| fig-height: 7
+#| fig-cap: "Template MISE by grid size and method. Finer grids may help template estimation for non-derivative methods."
+ggplot(
+  dt[failure == FALSE],
+  aes(y = method, x = template_mise, fill = n_grid)
+) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2, position = "dodge") +
+  facet_wrap(~noise_sd, labeller = labeller(noise_sd = function(x) paste0("noise=", x))) +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  scale_fill_brewer(palette = "Set2", name = "Grid size") +
+  labs(y = NULL, x = "Template MISE (log scale)") +
+  theme_benchmark()
+```
+
+```{r}
+#| label: template-ratio
+#| fig-height: 8
+#| fig-cap: "Template MISE ratio relative to grid=101. Values < 1 mean finer/coarser grid improves template estimation."
+t_ratio_dt <- dt[failure == FALSE,
+  .(template_mise = median(template_mise, na.rm = TRUE)),
+  by = .(dgp, method, n_grid, noise_sd)
+]
+t_baseline <- t_ratio_dt[n_grid == "101", .(dgp, method, noise_sd, base = template_mise)]
+t_ratio_dt <- merge(t_ratio_dt, t_baseline, by = c("dgp", "method", "noise_sd"))
+t_ratio_dt[, ratio := template_mise / base]
+t_ratio_dt <- t_ratio_dt[n_grid != "101"]
+
+ggplot(t_ratio_dt, aes(x = ratio, y = method, color = method)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_jitter(height = 0.15, size = 2, alpha = 0.6) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.4,
+    color = "black", linewidth = 0.4) +
+  facet_grid(n_grid ~ noise_sd,
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise=", x),
+      n_grid = function(x) paste0("grid=", x)
+    )
+  ) +
+  scale_color_manual(values = mcols, guide = "none") +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_continuous(trans = "log2",
+    breaks = c(0.25, 0.5, 1, 2, 4),
+    labels = c("1/4", "1/2", "1", "2", "4")
+  ) +
+  labs(x = expression("Template MISE ratio vs grid=101 (" * log[2] * " scale)"), y = NULL) +
+  theme_benchmark()
+```
+
+# Elastic Distance by Grid {#sec-elastic}
+
+SRSF elastic distance is reparameterization-invariant — but as a derivative-based
+metric, it may itself be affected by grid resolution. If elastic distance increases
+with grid size across all methods, this is a metric artifact rather than a method effect.
+
+```{r}
+#| label: elastic-grid
+#| fig-height: 7
+#| fig-cap: "Elastic (SRSF) template distance by grid size and method."
+if ("template_elastic_dist" %in% names(dt) && any(!is.na(dt$template_elastic_dist))) {
+  ggplot(
+    dt[failure == FALSE & !is.na(template_elastic_dist)],
+    aes(y = method, x = template_elastic_dist, fill = n_grid)
+  ) +
+    geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2, position = "dodge") +
+    facet_wrap(~noise_sd,
+      labeller = labeller(noise_sd = function(x) paste0("noise=", x))) +
+    scale_y_discrete(labels = mlabs) +
+    scale_x_log10() +
+    scale_fill_brewer(palette = "Set2", name = "Grid size") +
+    labs(y = NULL, x = "Elastic distance (log scale)") +
+    theme_benchmark()
+} else {
+  cat("*Elastic distance not available in results.*")
+}
+```
+
+# Grid $\times$ Noise Interaction {#sec-interaction}
+
+The key question: does the combination of fine grid + high noise compound for SRVF?
+
+```{r}
+#| label: grid-noise-interaction
+#| fig-height: 7
+#| fig-cap: "Grid x noise interaction: warp MISE profiles per method. Each line connects the 3 grid sizes for one DGP. Steeper upward slopes at grid=201 for noise=0.3 indicate grid-noise compounding."
+int_dt <- dt[failure == FALSE,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method, n_grid, noise_sd)
+]
+
+ggplot(int_dt, aes(x = n_grid, y = warp_mise, group = dgp, color = dgp)) +
+  geom_line(alpha = 0.7) +
+  geom_point(size = 2) +
+  facet_grid(method ~ noise_sd,
+    scales = "free_y",
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise=", x),
+      method = mlabs
+    )
+  ) +
+  scale_y_log10() +
+  labs(x = "Grid size", y = "Warp MISE (log scale)", color = "DGP") +
+  theme_benchmark()
+```
+
+```{r}
+#| label: grid-noise-findings
+#| results: asis
+# Grid x noise compound: ratio at (grid=201, noise=0.3) vs (grid=101, noise=0)
+compound_dt <- dt[failure == FALSE,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method, n_grid, noise_sd)
+]
+ref <- compound_dt[n_grid == "101" & noise_sd == "0",
+  .(dgp, method, ref = warp_mise)]
+stress <- compound_dt[n_grid == "201" & noise_sd == "0.3",
+  .(dgp, method, stress = warp_mise)]
+compound <- merge(ref, stress, by = c("dgp", "method"))
+compound[, compound_ratio := stress / ref]
+
+cat("**Grid × noise compound effect** (ratio of grid=201/noise=0.3 to grid=101/noise=0):\n\n")
+comp_summary <- compound[,
+  .(
+    median = median(compound_ratio, na.rm = TRUE),
+    max = max(compound_ratio, na.rm = TRUE)
+  ),
+  by = method
+][order(-median)]
+for (i in seq_len(nrow(comp_summary))) {
+  cat(sprintf("- **%s**: median %.1f×, max %.1f×\n",
+    mlabs[comp_summary$method[i]],
+    comp_summary$median[i], comp_summary$max[i]))
+}
+cat("\n")
+```
+
+# Per-DGP Profiles {#sec-dgp}
+
+```{r}
+#| label: dgp-profiles
+#| fig-height: 10
+#| fig-cap: "Per-DGP warp MISE by grid size, faceted by method. Shows whether the grid effect is consistent across DGPs or DGP-specific."
+profile_dt <- dt[failure == FALSE,
+  .(
+    median = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)
+  ),
+  by = .(dgp, method, n_grid, noise_sd)
+]
+
+ggplot(profile_dt, aes(x = n_grid, y = median, color = noise_sd, group = noise_sd)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.1, alpha = 0.4) +
+  facet_grid(dgp ~ method, scales = "free_y",
+    labeller = labeller(method = mlabs, dgp = dlabs)) +
+  scale_y_log10() +
+  scale_color_brewer(palette = "Dark2", name = "Noise") +
+  labs(x = "Grid size", y = "Warp MISE (log scale)") +
+  theme_benchmark(base_size = 9)
+```
+
+# Timing {#sec-timing}
+
+```{r}
+#| label: timing
+#| fig-height: 5
+#| fig-cap: "Computation time per curve (seconds) by grid size and method. SRVF scales steeply with grid size due to DP alignment."
+ggplot(
+  dt[failure == FALSE],
+  aes(x = n_grid, y = time_per_curve, fill = n_grid)
+) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+  facet_wrap(~method, scales = "free_y", labeller = labeller(method = mlabs)) +
+  scale_y_log10() +
+  scale_fill_brewer(palette = "Set2", name = "Grid size") +
+  labs(x = "Grid size", y = "Time per curve (sec, log scale)") +
+  theme_benchmark()
+```
+
+```{r}
+#| label: timing-table
+#| results: asis
+timing_dt <- dt[failure == FALSE,
+  .(time_per_curve = median(time_per_curve, na.rm = TRUE)),
+  by = .(method, n_grid)
+]
+timing_wide <- dcast(timing_dt, method ~ n_grid, value.var = "time_per_curve")
+timing_wide[, method := mlabs[method]]
+cat("**Median time per curve (seconds) by method and grid size:**\n\n")
+print(knitr::kable(timing_wide, digits = 4))
+```
+
+# Summary {#sec-summary}
+
+```{r}
+#| label: summary-table
+#| results: asis
+# Summary: for each method, median warp MISE ratio at grid=51 and grid=201 vs 101
+ratio_summary_all <- ratio_dt[,
+  .(median_ratio = median(ratio, na.rm = TRUE)),
+  by = .(method, n_grid, noise_sd)
+]
+summary_wide <- dcast(ratio_summary_all,
+  method + noise_sd ~ n_grid,
+  value.var = "median_ratio"
+)
+summary_wide[, method := mlabs[method]]
+cat("**Median warp MISE ratio vs grid=101** (by method and noise level):\n\n")
+print(knitr::kable(summary_wide, digits = 2))
+cat("\n")
+```
+
+```{r}
+#| label: recommendation
+#| results: asis
+# Data-driven recommendation
+srvf_201 <- ratio_dt[method == "srvf" & n_grid == "201",
+  median(ratio, na.rm = TRUE)]
+srvf_51 <- ratio_dt[method == "srvf" & n_grid == "51",
+  median(ratio, na.rm = TRUE)]
+fda_201 <- ratio_dt[method == "fda_default" & n_grid == "201",
+  median(ratio, na.rm = TRUE)]
+
+cat("**Recommendation for `tf_register()` default grid:**\n\n")
+cat(sprintf(
+  "- SRVF: warp MISE median ratio at grid=201 is %.2f (%.0f%% %s); at grid=51 is %.2f.\n",
+  srvf_201,
+  abs(srvf_201 - 1) * 100,
+  ifelse(srvf_201 > 1, "degradation", "improvement"),
+  srvf_51
+))
+cat(sprintf(
+  "- FDA default: warp MISE median ratio at grid=201 is %.2f; template MISE improves.\n",
+  fda_201
+))
+cat("- Grid=101 remains a reasonable default. Users of SRVF should be cautioned against finer grids unless they also increase regularization.\n")
+```

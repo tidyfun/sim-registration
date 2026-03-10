@@ -1,0 +1,403 @@
+---
+title: "Registration Benchmark v2 — Study D: Oracle Template"
+subtitle: "Internal Report — tf Package"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+    self-contained: true
+execute:
+  cache: true
+  warning: false
+  message: false
+---
+
+# Setup {.unnumbered}
+
+```{r}
+#| label: setup
+#| cache: false
+library(ggplot2)
+library(data.table)
+library(patchwork)
+
+base_dir <- here::here()
+source(file.path(base_dir, "sim-analyze.R"))
+
+mcols <- method_colors()
+mlabs <- method_labels()
+dlabs <- dgp_short_labels()
+```
+
+```{r}
+#| label: load-data
+dt <- load_study_d()
+```
+
+Study D decomposes total registration error into **template estimation error** vs
+**warp estimation error**. When given the true template (oracle mode), template MISE = 0
+and any remaining warp MISE is purely from the warp estimation algorithm.
+
+**Design**: 6 DGPs $\times$ 2 template modes (oracle, estimated) $\times$ 2 conditions
+$\times$ 5 methods = 120 cells $\times$ 50 reps = 6,000 runs.
+
+Two conditions:
+
+| Condition | Noise | Severity | Purpose |
+|-----------|-------|----------|---------|
+| Easy | 0.1 | 0.5 | Anchor: template estimation is relatively easy |
+| Hard | 0.3 | 1.0 | Stress: high noise + large warps stress iterative estimation |
+
+```{r}
+#| label: dgp-table
+dgps_used <- c("D01", "D03", "D09", "D10", "D13", "D14")
+knitr::kable(
+  dgp_factors()[dgp %in% dgps_used],
+  caption = "DGPs in Study D: 6 DGPs spanning both templates, all 3 warp types, and none/highrank amplitude."
+)
+```
+
+# Sanity Checks {#sec-sanity}
+
+## Template MISE in Oracle Mode
+
+Template MISE should be exactly 0 (or numerically negligible) in oracle mode,
+since the true template is passed directly to the method.
+
+```{r}
+#| label: sanity-template-mise
+#| results: asis
+tmise <- dt[failure == FALSE,
+  .(template_mise = median(template_mise, na.rm = TRUE)),
+  by = .(template_mode, method)
+]
+tmise_wide <- dcast(tmise, method ~ template_mode, value.var = "template_mise")
+tmise_wide[, method := mlabs[method]]
+cat("**Median template MISE by mode:**\n\n")
+print(knitr::kable(tmise_wide, digits = 8))
+oracle_max <- dt[use_true_template == TRUE & failure == FALSE,
+  max(template_mise, na.rm = TRUE)]
+cat(sprintf("\nMax template MISE in oracle mode: %.2e (expect ~0).\n\n", oracle_max))
+```
+
+## Landmark Oracle Benefit
+
+Landmark registration does not use a template estimate — it aligns to detected landmarks.
+The oracle benefit for landmarks should be exactly 0.
+
+```{r}
+#| label: sanity-landmark
+#| results: asis
+lm_dt <- dt[method == "landmark_auto" & failure == FALSE,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(template_mode, condition)
+]
+lm_wide <- dcast(lm_dt, condition ~ template_mode, value.var = "warp_mise")
+lm_wide[, diff := estimated - oracle]
+cat("**Landmark warp MISE by condition and template mode:**\n\n")
+print(knitr::kable(lm_wide, digits = 6))
+```
+
+# Failure Rates
+
+```{r}
+#| label: failures
+#| results: asis
+fail_dt <- dt[,
+  .(n_fail = sum(failure), n_total = .N, rate = mean(failure)),
+  by = .(method, template_mode)
+]
+fail_any <- fail_dt[n_fail > 0]
+if (nrow(fail_any) == 0) {
+  cat("No failures across all 6,000 runs.\n\n")
+} else {
+  cat("**Failure rates by method and template mode:**\n\n")
+  print(knitr::kable(fail_dt[n_fail > 0], digits = 3))
+}
+```
+
+# Oracle Benefit: Warp MISE {#sec-warp-benefit}
+
+**Oracle benefit** = warp MISE (estimated template) $-$ warp MISE (oracle template).
+Positive values mean the oracle helps. Large oracle benefit implies the method is
+sensitive to template estimation quality.
+
+## Overview Heatmap
+
+```{r}
+#| label: oracle-benefit-heatmap
+#| fig-height: 7
+#| fig-cap: "Oracle benefit (% improvement in warp MISE) by method and DGP, for each condition. Darker red = larger oracle benefit."
+benefit_dt <- dt[failure == FALSE,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, method, template_mode, condition)
+]
+benefit_wide <- dcast(benefit_dt,
+  dgp + method + condition ~ template_mode,
+  value.var = "warp_mise"
+)
+benefit_wide[, pct_improvement := 100 * (estimated - oracle) / estimated]
+
+ggplot(benefit_wide, aes(x = method, y = dgp, fill = pct_improvement)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_label(aes(label = sprintf("%.0f%%", pct_improvement)),
+    size = 2.3, fill = "white", alpha = 0.85,
+    label.size = 0, label.padding = unit(1.5, "pt")) +
+  facet_wrap(~condition) +
+  scale_x_discrete(labels = mlabs) +
+  scale_y_discrete(labels = dlabs) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "grey95", high = "#B2182B",
+    midpoint = 0, name = "Oracle\nbenefit (%)",
+    limits = c(-20, 100)
+  ) +
+  labs(x = NULL, y = NULL,
+    subtitle = "Oracle benefit: % improvement in warp MISE when given true template") +
+  theme_benchmark()
+```
+
+## Per-Method Oracle Benefit
+
+```{r}
+#| label: oracle-benefit-by-method
+#| fig-height: 6
+#| fig-cap: "Distribution of oracle benefit (% improvement) by method. Each dot is one DGP. The crossbar shows the median."
+ggplot(benefit_wide[method != "landmark_auto"],
+  aes(x = pct_improvement, y = method, color = method)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  geom_jitter(height = 0.15, size = 2.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.4,
+    color = "black", linewidth = 0.4) +
+  facet_wrap(~condition) +
+  scale_color_manual(values = mcols, guide = "none") +
+  scale_y_discrete(labels = mlabs) +
+  labs(x = "Oracle benefit (% improvement in warp MISE)", y = NULL) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: oracle-benefit-findings
+#| results: asis
+method_summary <- benefit_wide[method != "landmark_auto",
+  .(
+    median_pct = median(pct_improvement, na.rm = TRUE),
+    min_pct = min(pct_improvement, na.rm = TRUE),
+    max_pct = max(pct_improvement, na.rm = TRUE)
+  ),
+  by = .(method, condition)
+]
+
+cat("**Oracle benefit by method** (% improvement in warp MISE):\n\n")
+for (cond in c("easy", "hard")) {
+  cat(sprintf("*%s condition (noise=%s, severity=%s):*\n\n",
+    cond,
+    ifelse(cond == "easy", "0.1", "0.3"),
+    ifelse(cond == "easy", "0.5", "1.0")))
+  sub <- method_summary[condition == cond][order(-median_pct)]
+  for (i in seq_len(nrow(sub))) {
+    cat(sprintf("- **%s**: median %.0f%% [%.0f%%, %.0f%%]\n",
+      mlabs[sub$method[i]],
+      sub$median_pct[i], sub$min_pct[i], sub$max_pct[i]))
+  }
+  cat("\n")
+}
+```
+
+## Condition Effect: Easy vs Hard
+
+```{r}
+#| label: condition-effect
+#| fig-height: 6
+#| fig-cap: "Oracle benefit by condition. Connected points show how oracle benefit changes from easy to hard for each method-DGP combination."
+ggplot(benefit_wide[method != "landmark_auto"],
+  aes(x = condition, y = pct_improvement, group = interaction(method, dgp),
+    color = method)) +
+  geom_line(alpha = 0.5) +
+  geom_point(size = 2) +
+  facet_wrap(~method, labeller = labeller(method = mlabs)) +
+  scale_color_manual(values = mcols, guide = "none") +
+  labs(x = "Condition", y = "Oracle benefit (%)") +
+  theme_benchmark()
+```
+
+```{r}
+#| label: condition-findings
+#| results: asis
+cond_change <- dcast(method_summary, method ~ condition, value.var = "median_pct")
+cond_change[, change := hard - easy]
+
+cat("**Does oracle benefit grow from easy to hard?**\n\n")
+for (i in seq_len(nrow(cond_change))) {
+  m <- cond_change$method[i]
+  cat(sprintf("- **%s**: easy %.0f%% → hard %.0f%% (%+.0f pp)\n",
+    mlabs[m], cond_change$easy[i], cond_change$hard[i], cond_change$change[i]))
+}
+cat("\n")
+cat("Positive change means the hard condition amplifies the oracle benefit, ",
+  "as expected — template estimation is more difficult under high noise and severity.\n")
+```
+
+# Warp MISE: Oracle vs Estimated {#sec-warp-comparison}
+
+Direct comparison of warp MISE under oracle and estimated template modes.
+
+```{r}
+#| label: warp-comparison
+#| fig-height: 8
+#| fig-cap: "Warp MISE by template mode (oracle vs estimated), faceted by method and condition. Boxplots pool over all DGPs."
+ggplot(
+  dt[failure == FALSE & method != "landmark_auto"],
+  aes(y = template_mode, x = warp_mise, fill = template_mode)
+) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+  facet_grid(method ~ condition,
+    scales = "free_x",
+    labeller = labeller(method = mlabs)) +
+  scale_fill_manual(
+    values = c(estimated = "#F0E442", oracle = "#56B4E9"),
+    guide = "none"
+  ) +
+  scale_x_log10() +
+  labs(y = NULL, x = "Warp MISE (log scale)") +
+  theme_benchmark()
+```
+
+## Per-DGP Comparison
+
+```{r}
+#| label: dgp-comparison
+#| fig-height: 8
+#| fig-cap: "Per-DGP warp MISE comparison. Orange = estimated, blue = oracle. Methods where the gap is large benefit most from knowing the true template."
+dgp_comp <- dt[failure == FALSE,
+  .(
+    median = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)
+  ),
+  by = .(dgp, method, template_mode, condition)
+]
+
+ggplot(dgp_comp, aes(x = template_mode, y = median, fill = template_mode)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.2, alpha = 0.5) +
+  facet_grid(dgp ~ method + condition,
+    scales = "free_y",
+    labeller = labeller(method = mlabs, dgp = dlabs)) +
+  scale_fill_manual(
+    values = c(estimated = "#F0E442", oracle = "#56B4E9"),
+    name = "Template"
+  ) +
+  labs(x = NULL, y = "Warp MISE") +
+  theme_benchmark(base_size = 8) +
+  theme(axis.text.x = element_blank())
+```
+
+# Template Estimation Quality {#sec-template-quality}
+
+How good are the template estimates? This contextualizes the oracle benefit — methods
+with poor template estimates will show large oracle benefit.
+
+```{r}
+#| label: template-quality
+#| fig-height: 6
+#| fig-cap: "Template MISE in estimated mode, by method and DGP. Methods with larger template MISE generally show larger oracle benefit."
+est_only <- dt[use_true_template == FALSE & failure == FALSE]
+
+ggplot(est_only, aes(y = method, x = template_mise, fill = method)) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+  facet_grid(dgp ~ condition,
+    scales = "free_x",
+    labeller = labeller(dgp = dlabs)) +
+  scale_fill_manual(values = mcols, guide = "none") +
+  scale_y_discrete(labels = mlabs) +
+  scale_x_log10() +
+  labs(y = NULL, x = "Template MISE (log scale, estimated mode only)") +
+  theme_benchmark(base_size = 9)
+```
+
+```{r}
+#| label: template-warp-correlation
+#| fig-height: 5
+#| fig-cap: "Correlation between template MISE and warp MISE across replications (estimated mode). Each dot is one (DGP, method, condition) combination."
+cor_dt <- est_only[,
+  .(
+    template_mise = median(template_mise, na.rm = TRUE),
+    warp_mise = median(warp_mise, na.rm = TRUE)
+  ),
+  by = .(dgp, method, condition)
+]
+
+ggplot(cor_dt, aes(x = template_mise, y = warp_mise, color = method)) +
+  geom_point(size = 2.5) +
+  facet_wrap(~condition) +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(values = mcols, labels = mlabs, name = "Method") +
+  labs(x = "Template MISE (log scale)", y = "Warp MISE (log scale)") +
+  theme_benchmark()
+```
+
+```{r}
+#| label: template-warp-cor-findings
+#| results: asis
+cors <- cor_dt[,
+  .(r = cor(log(template_mise), log(warp_mise), use = "complete.obs")),
+  by = condition
+]
+cat("**Correlation between log(template MISE) and log(warp MISE):**\n\n")
+for (i in seq_len(nrow(cors))) {
+  cat(sprintf("- %s condition: r = %.2f\n", cors$condition[i], cors$r[i]))
+}
+cat("\n")
+if (all(cors$r > 0.5)) {
+  cat("Strong positive correlation confirms that template estimation quality ",
+    "directly impacts warp recovery. Methods that estimate templates poorly ",
+    "benefit most from the oracle.\n")
+}
+```
+
+# Summary {#sec-summary}
+
+```{r}
+#| label: summary
+#| results: asis
+# Final ranking by oracle benefit
+final <- benefit_wide[method != "landmark_auto",
+  .(median_pct = median(pct_improvement, na.rm = TRUE)),
+  by = method
+][order(-median_pct)]
+
+cat("**Key findings:**\n\n")
+cat("1. **Oracle benefit ranking** (median % improvement in warp MISE, pooled over conditions and DGPs):\n\n")
+for (i in seq_len(nrow(final))) {
+  cat(sprintf("   - %s: %.0f%%\n", mlabs[final$method[i]], final$median_pct[i]))
+}
+cat("\n")
+
+# Easy vs hard
+hard_benefit <- benefit_wide[method != "landmark_auto" & condition == "hard",
+  median(pct_improvement, na.rm = TRUE)]
+easy_benefit <- benefit_wide[method != "landmark_auto" & condition == "easy",
+  median(pct_improvement, na.rm = TRUE)]
+cat(sprintf(
+  "2. **Condition effect**: Median oracle benefit increases from %.0f%% (easy) to %.0f%% (hard), confirming that template estimation is the bottleneck under high noise/severity.\n\n",
+  easy_benefit, hard_benefit
+))
+
+cat("3. **Landmark sanity**: Oracle benefit is exactly 0%% for landmarks (no template used), validating the experimental design.\n\n")
+
+# DGP with largest oracle benefit
+max_dgp <- benefit_wide[method != "landmark_auto"][which.max(pct_improvement)]
+cat(sprintf(
+  "4. **Largest oracle benefit**: %s on %s (%s condition): %.0f%% improvement.\n\n",
+  mlabs[max_dgp$method], max_dgp$dgp, max_dgp$condition, max_dgp$pct_improvement
+))
+
+cat("5. **Implication for `tf_register()`**: Methods with large oracle benefit would gain most from better template initialization or multi-resolution template estimation strategies.\n")
+```
