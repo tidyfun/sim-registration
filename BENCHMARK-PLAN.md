@@ -186,22 +186,213 @@ The third noise level (0.3) was added to test whether method rankings (especiall
 SRVF vs FDA) flip under high noise, since unregularized SRVF operates on SRSFs
 (derivatives) which amplify high-frequency noise.
 
-### Study B: Penalization (7,200 runs)
-3 DGPs (data-driven from Study A) x 6 lambdas x 2 methods (srvf, fda_default)
-x 2 noise x 2 severity = 144 cells x 50 reps
+### Study B: Penalization (~19,000 runs)
+4 DGPs x 8 lambdas x 3 methods (srvf, fda_default, fda_crit1)
+x 3 noise (0, 0.1, 0.3) x 2 severity = 576 cells x ~33 reps
 
-### Study C: Oracle paired (2,000 runs)
-4 DGPs (data-driven from Study A) x 2 template modes x 5 methods
-x noise=0.1 x severity=0.5 = 40 cells x 50 reps
+**Purpose**: Test whether regularization (lambda > 0) can rescue methods in regimes
+where they struggle, particularly SRVF under high noise.
 
-### Study D: Outlier contamination (4,500 runs)
-3 representative DGPs x 2 outlier types (shape, phase) x 3 fractions (5%, 10%, 20%)
-x 5 methods x noise=0.1 x severity=0.5 = 90 cells x 50 reps
+**DGP selection** (4 DGPs, covering the key method-ranking regimes):
 
-Shape outliers: random sinusoids scaled to ~2x template range.
-Phase outliers: extreme warps (severity=3.0, 6x default).
+| DGP | Why |
+|-----|-----|
+| D01 (harmonic+simple+none) | Easy baseline where SRVF dominates — does lambda *hurt* a winning method? |
+| D02 (harmonic+complex+none) | Complex warps, no amplitude confound — over-registration regime, lambda might help |
+| D09 (harmonic+simple+highrank) | Realistic amplitude — does lambda interact with amplitude variation? |
+| D12 (wiggly+complex+highrank) | Hardest DGP — stress test for regularization |
 
-**Total: ~58,700 runs**
+**Lambda grid** (calibrated from pilot, job 5131464):
+`c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)` — 8 values spanning 5 orders of magnitude.
+
+Lambda pilot findings (2 DGPs × 10 lambdas × 3 methods × 3 noise × 10 reps = 1,800 runs):
+- **Methods need very different lambda ranges.** fda_default optimal: 1e-4 (D02) to
+  0.5–10 (D12). fda_crit1 optimal: 1e-3 (D02) to 0.05–0.1 (D12). SRVF optimal:
+  1e-4 (clean) to 10 (noisy D02) — but lambda=0 is best on D12 regardless of noise.
+- **SRVF lambda×noise interaction is enormous on D02**: λ*=1e-4 at noise=0, λ*=5e-3
+  at noise=0.1, λ*=10 at noise=0.3. On D12 the optimal is λ=0 at all noise levels —
+  regularization only hurts.
+- **FDA benefits substantially on D12**: fda_crit1 improves 50–60%, fda_default
+  improves 45–52%. Smaller improvement on D02 (10–25%).
+- **fda_crit1 vs fda_default respond differently**: fda_crit1 optimal is consistently
+  higher than fda_default on D02 (1e-3 vs 1e-4), but lower on D12 (0.05–0.1 vs
+  0.5–10). The two criteria have qualitatively different lambda profiles.
+- **A shared lambda grid is justified**: the 8-value grid covers all methods' optima.
+  Method-specific grids are unnecessary since the shared grid includes each method's
+  optimal region.
+
+**Rationale for design choices**:
+- **+fda_crit1**: Criterion 1 penalizes warp roughness directly, so its interaction
+  with external lambda differs qualitatively from fda_default. Pilot confirmed:
+  different lambda profiles. [Council R4: unanimous]
+- **+noise=0.3**: The key regime where SRVF degrades (derivative amplification) and
+  FDA rankings may flip. Pilot confirmed: SRVF optimal lambda jumps 5 orders of
+  magnitude from noise=0 to noise=0.3.
+- **+1 DGP** (D01): Need a case where the default (lambda=0) is already optimal to
+  verify that the lambda grid includes "no regularization" as a viable choice.
+- **4 DGPs instead of 3**: Covers easy/hard × with/without amplitude. The extra DGP
+  adds modest cost but avoids confounding warp difficulty with amplitude.
+- **~33 reps**: Paired design (same seeds across lambda values) makes within-lambda
+  comparisons powerful even at 33 reps. The primary signal is the U-shape of the
+  MISE-vs-lambda curve, not a point estimate. If ambiguous U-shapes are observed,
+  run a targeted 50-rep extension for the 2–3 most interesting cells.
+
+**Key analyses**:
+- Lambda × noise interaction: does optimal lambda shift with noise level?
+- Per-DGP optimal lambda profiles for SRVF vs FDA (and fda_crit1 vs fda_default)
+- Warp MISE vs lambda curves (U-shape confirmed by pilot for FDA; monotone for SRVF on D12)
+- fda_crit1 vs fda_default: criterion choice interacts with lambda (pilot-confirmed)
+- Does lambda rescue SRVF at noise=0.3? (pilot suggests: only on D02, not D12)
+
+### Study C: Grid resolution sensitivity (~11,250 runs)
+5 DGPs x 3 grid sizes (51, 101, 201) x 3 noise (0, 0.1, 0.3)
+x 5 methods x severity=1.0 = 225 cells x 50 reps
+
+**Motivation**: Grid-size pilot (job 5131384) revealed that SRVF warp MISE degrades
+1.82× at n_grid=201 vs 101, while FDA template MISE *improves* ~40%. This is because
+SRVF operates on SRSFs (numerical derivatives) which amplify discretization artifacts
+at finer grids. Grid resolution is a confound for method comparison that needs
+systematic investigation.
+
+**DGP selection** (5 DGPs, covering all warp types × both templates):
+
+| DGP | Why |
+|-----|-----|
+| D01 (harmonic+simple+none) | Easy baseline — isolates pure grid effect without other confounds |
+| D03 (wiggly+complex+none) | Hard warps + hard template — do complex Matérn warps need finer grids? |
+| D04 (harmonic+affine+none) | Affine warps — no numerical integration in warp generation, so grid artifacts come purely from the method |
+| D09 (harmonic+simple+highrank) | Realistic amplitude — does highrank amplitude interact with grid resolution? |
+| D12 (wiggly+complex+highrank) | Hardest DGP — stress test, maximum grid sensitivity expected |
+
+**Coverage**: Templates: harmonic (D01, D04, D09) + wiggly (D03, D12). Warps: simple
+(D01, D09) + complex (D03, D12) + affine (D04). Amplitude: none (D01, D03, D04) +
+highrank (D09, D12).
+
+**Design choices**:
+- **Grid levels**: 51, 101, 201 — span coarse-to-fine on a log scale (doubling).
+  51 tests whether SRVF actually improves at coarser grids; 201 confirms pilot
+  degradation with more reps and DGPs.
+- **Severity=1.0 only**: Pilot used severity=1.0. A grid × severity interaction is
+  plausible in principle (at low severity, small warps → discretization noise may
+  dominate), but likely second-order vs grid × method and grid × noise. Adding
+  severity would double runs for limited insight. [Council R4: noted as limitation]
+- **All 3 noise levels**: Grid × noise interaction is the key question — does finer
+  grid amplify noise more for derivative-based methods?
+- **50 reps**: Sufficient for method × grid comparisons; paired design via common seeds.
+
+**Key analyses**:
+- Method × grid interaction plots (warp MISE, template MISE, elastic distance)
+- Per-method degradation ratios (grid 201 / grid 101, grid 51 / grid 101)
+- Grid × noise interaction: does noise=0.3 + grid=201 compound for SRVF?
+- Wilcoxon signed-rank tests on paired within-DGP comparisons
+- Recommendation for default grid resolution in tf_register()
+
+**Grid × penalization cross-check** (~1,800 runs): If Study B finds that lambda
+rescues SRVF at high noise, test whether it also compensates for grid artifacts.
+Run D02 at grid={101, 201} × lambda={0, 0.01, 0.1} × noise={0, 0.3} for SRVF
+only, 50 reps. Can be framed as a Study C extension or a small Study F.
+[Council R4: raised by all 3 reviewers as a key cross-study interaction]
+
+### Study D: Oracle template (~6,000 runs)
+6 DGPs x 2 template modes (oracle, estimated) x 5 methods
+x 2 conditions = 120 cells x 50 reps
+
+**Purpose**: Decompose total registration error into template estimation error vs
+warp estimation error. When given the true template, template MISE = 0 and any
+remaining warp MISE is purely from the warp estimation algorithm.
+
+**DGP selection** (6 DGPs, balanced template × difficulty):
+
+| DGP | Why |
+|-----|-----|
+| D01 (harmonic+simple+none) | Easy baseline — template is easy to estimate, expect small oracle benefit |
+| D03 (wiggly+complex+none) | Hard template — biggest expected oracle benefit (wiggly is hard to estimate) |
+| D09 (harmonic+simple+highrank) | Amplitude confounds template estimation — oracle removes this confound |
+| D10 (harmonic+complex+highrank) | Complex warps + amplitude — is template error or warp error dominant? |
+| D13 (wiggly+affine+highrank) | Affine warps + wiggly template — different warp mechanism, non-domain-preserving |
+| D14 (wiggly+simple+none) | Wiggly template without amplitude — isolates template difficulty effect |
+
+**Two conditions** (easy anchor + hard stress test):
+
+| Condition | noise | severity | Purpose |
+|-----------|-------|----------|---------|
+| Easy | 0.1 | 0.5 | Anchor: template estimation is relatively easy, oracle benefit should be small |
+| Hard | 0.3 | 1.0 | Stress: high noise + large warps stress iterative template estimation → larger differential oracle benefit across methods |
+
+**Rationale for changes vs original design**:
+- **+2 DGPs** (D01, D13 or D14): Original selection (D03, D08, D10, D12) overweighted
+  wiggly+complex. Need harmonic DGPs to test the method×template interaction (Study A
+  showed SRVF loses template MISE specifically on harmonic). Need an easy case to anchor
+  the oracle benefit scale.
+- **D14 over D08**: D08 (wiggly+complex+rank2) is similar to D12 (wiggly+complex+highrank).
+  D14 (wiggly+simple+none) provides a clean wiggly-only case without amplitude or complex
+  warp confounds.
+- **Two conditions instead of one**: A single easy condition (noise=0.1, severity=0.5)
+  compresses oracle benefit differences — template estimation isn't stressed enough to
+  reveal which methods are most template-sensitive. The hard condition (noise=0.3,
+  severity=1.0) is where template estimation actually fails meaningfully, exposing the
+  interesting differential oracle benefit across methods. [Council R4: 2/3 reviewers]
+
+**Key analyses**:
+- Oracle benefit = (warp MISE with estimated template) − (warp MISE with oracle template)
+- Per-method oracle benefit: which methods are most sensitive to template quality?
+- DGP-conditional oracle benefit: where does template estimation matter most?
+- Condition-conditional: does oracle benefit grow from easy → hard as expected?
+- Template MISE in estimated mode as sanity check (should be ~0 in oracle mode)
+
+### Study E: Outlier contamination (~9,000 runs)
+3 DGPs x 2 outlier types (shape, phase) x 3 fractions (10%, 20%, 30%)
+x 5 methods x 2 noise (0.1, 0.3) x severity=0.5 = 180 cells x 50 reps
+
+**Purpose**: Test method robustness when a fraction of curves are outliers (wrong shape
+or extreme warping). Relevant for practical use where data cleaning is imperfect.
+
+**DGP selection** (3 DGPs, spanning difficulty):
+
+| DGP | Why |
+|-----|-----|
+| D02 (harmonic+complex+none) | Moderate difficulty, no amplitude — cleanest outlier signal. Complex warps mean phase outliers compete with legitimate warp variation. |
+| D09 (harmonic+simple+highrank) | Realistic amplitude — do shape outliers get confused with legitimate amplitude variation? Key practical question. |
+| D12 (wiggly+complex+highrank) | Hardest DGP — stress test. Methods already struggle here; how much worse do outliers make it? |
+
+**Rationale for changes vs original design**:
+- **D02 replaces D01**: D01 (harmonic+simple+none) is too easy — all methods handle it
+  well, so outlier effects would be trivially small. D02 adds complex warps, making
+  phase outliers harder to distinguish from legitimate variation.
+- **D03 dropped**: D03 (wiggly+complex+none) overlaps with D12 on template+warp
+  difficulty. D09 adds the amplitude dimension instead, which is the more interesting
+  confound for outlier detection.
+- **D12 replaces D03 as "hard" case**: Hardest DGP tests whether outliers break methods
+  that are already near their limits.
+- **+noise=0.3**: At high noise, legitimate observations already look noisy, making
+  shape outliers harder to distinguish from noisy inliers. Breakdown curves at noise=0.1
+  alone would overestimate robustness. [Council R4: Claude, Codex]
+- **Contamination fractions raised to 10%/20%/30%**: At n=50 curves, 5% contamination
+  means only 2–3 outliers — discrete rounding artifacts dominate. 10% (5 curves) is
+  the practical minimum for stable results. [Council R4: Codex]
+
+**Outlier types**:
+- **Shape outliers**: Random sinusoids scaled to ~2x template range. These curves have
+  the wrong shape entirely — a well-functioning method should downweight or exclude them.
+- **Phase outliers**: Extreme warps (severity=3.0, 6× default). These curves have the
+  right shape but extreme time warping — tests whether iterative methods (FDA, SRVF)
+  get pulled toward extreme warps.
+
+**Implementation note**: Verify that `contaminate_data()` uses deterministic outlier
+selection given the same base seed, so that paired comparison across contamination
+fractions is valid (same curves are selected as outliers at 10% and 20%, with 20%
+adding more). [Council R4: Claude]
+
+**Key analyses**:
+- Breakdown curves: at what contamination fraction does each method fail?
+- Shape vs phase outlier sensitivity: which type is more damaging per method?
+- Noise × contamination interaction: is robustness worse at high noise?
+- Template bias under contamination (outliers pull template estimate)
+- Warp MISE degradation curves by contamination fraction
+- Report failure rates explicitly — conditional-on-success comparisons are biased
+  if failure probability changes with contamination [Council R4: Codex]
+
+**Total: ~45,850 runs (Studies B–E + grid×lambda cross-check) + 45,000 (Study A) ≈ 91,000 runs**
 
 ## 8. Code Structure
 
@@ -212,7 +403,7 @@ sim-registration/            Standalone repo (~/fda/sim-registration/)
   sim-dgp.R          ~500 lines   Templates, warps, amplitude, generate_data()
   sim-methods.R       ~110 lines   5 method wrappers returning tf_registration
   sim-metrics.R       ~300 lines   All metrics using tf API (incl. SRSF elastic dist)
-  sim-config.R        ~220 lines   All study designs (A-D)
+  sim-config.R        ~220 lines   All study designs (A-E)
   sim-run.R           ~300 lines   Runner with incremental saves per DGP
   sim-validate.R      ~150 lines   Known-answer tests for v2
   sim-analyze.R       ~340 lines   Data loading, aggregation, plot helpers
@@ -244,7 +435,7 @@ sim-registration/            Standalone repo (~/fda/sim-registration/)
 - Four amplitude types via `generate_amplitude()` + `apply_amplitude()`
   - rank2 calibrated: scale_sd = shift_sd = amp_sd/sqrt(2) for comparable total variance
 - `true_prewarp_curves()` computes ground-truth aligned curves for metrics
-- `contaminate_data()` for Study D (shape and phase outliers)
+- `contaminate_data()` for Study E (shape and phase outliers)
 - `dgp_spec()` dispatches DGP name -> (template, phase, amplitude) tuple (D01-D15)
 
 ### Phase 2: Methods + Metrics (done)
@@ -312,10 +503,31 @@ Second council reviewed study design, parameter ranges, and report quality:
 - Results used for initial analysis and report draft
 - **Superseded** by updated design (15 DGPs, 3 noise levels, calibrated params)
 
-### Phase 7: Study A production run v2 (pending)
+### Council Review R3 (done)
+Council of 4 AI agents (2× Claude, Codex, Gemini) reviewed Study A report. See
+TODO section for full list. Key fixes applied: Type II ANOVA, elastic distance
+metric (fdasrvf::elastic.distance), interaction plots, alignment error section.
+
+### Council Review R4 (done)
+Council of 3 AI agents (Claude, Codex, Gemini) reviewed Studies B–E design.
+Applied changes:
+1. Added fda_crit1 to Study B (unanimous) — different criterion, different lambda response
+2. Added hard condition (noise=0.3, severity=1.0) to Study D (2/3 reviewers)
+3. Added noise=0.3 to Study E + raised min contamination from 5% to 10% (Codex: discrete artifacts at n=50)
+4. Added grid × lambda cross-check to Study C (~1,800 runs, all 3 reviewers)
+5. Noted severity=1.0-only limitation in Study C, lambda-grid pilot for Study B
+6. Added metric hierarchy question (template MISE vs elastic distance) to open questions
+Acknowledged but deferred:
+- 9 missing DGP cells (low priority)
+- v1→v2 design differences may invalidate some B–E rationale (finalize after v2)
+- Failure rate integration into B–E analyses (implement during analysis)
+
+### Phase 7: Study A production run v2 (submitted)
 - Updated design: 15 DGPs x 2 severity x 3 noise x 5 methods = 450 cells x 100 reps = 45K runs
 - Changes from v1: +2 DGPs (D14, D15), +1 noise level (0.3), doubled affine severity,
-  calibrated rank2 amplitude, SRSF elastic distance metric, forward warp comparison
+  calibrated rank2 amplitude, Fisher-Rao elastic distance metric, forward warp comparison
+- tf updated to 639d19d ("Fix CC warp monotonicity") — FDA results may differ from v1
+- LRZ job 5131463 (2026-03-10), 32 cores, serial_std partition, 24h time limit
 - Batched by (DGP, method): 75 batches, each ~600 runs
 - Results saved as `results_D{nn}_{method}_A.rds`
 
@@ -324,9 +536,9 @@ Second council reviewed study design, parameter ranges, and report quality:
 - sim-report.qmd: Quarto report implementing analysis plan below
 - All findings sections use data-driven `results: asis` code chunks
 
-### Phases 9+: Sub-studies B, C, D (pending)
-- DGPs for Studies B-D selected from Study A diagnostics
-- Studies B/C/D runs, analysis, integrated report
+### Phases 9+: Sub-studies B–E (pending)
+- DGPs for Studies B–E selected from Study A diagnostics
+- Studies B–E runs, analysis, integrated report
 
 ## 10. Study A Analysis Plan
 
@@ -486,9 +698,68 @@ speculative findings (6/7 original speculative findings were factually wrong).
 
 ## Open Questions (resolve during analysis)
 
-- Which DGPs for Studies B, C, D (data-driven from Study A)
-- Lambda grid for penalization arm (method-specific, possibly data-dependent)
-- Whether `fda_crit1` differs meaningfully from `fda_default` in harder settings
+- ~~Lambda grid for Study B~~ **Resolved**: Pilot (job 5131464) calibrated grid to
+  `c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)`. Shared grid covers all methods' optima.
+  Methods have qualitatively different lambda profiles (documented in Section 7).
+- Study B–E DGP selections are tentative (documented in Section 7). Finalize after
+  Study A re-run based on actual method rankings, interaction patterns, and failure rates.
+- Metric hierarchy: template MISE and elastic distance are strongly correlated (ρ=0.85).
+  Clarify which is primary and which is confirmatory for Studies B–E to avoid redundant
+  testing. [Council R4: Codex]
+
+## TODO (from Council Review R3)
+
+Council of 4 AI agents reviewed the Study A report and code. Key issues to address:
+
+### Before Study A re-run
+- [x] **Fix elastic distance metric**: `compute_template_elastic_dist()` in `sim-metrics.R`
+  now uses `fdasrvf::elastic.distance()` for proper Fisher-Rao amplitude distance.
+  Verified in grid-size pilot (job 5131384): values range 0.2–2.6, ρ=0.85 with
+  template MISE, sensible DGP/method patterns.
+- [ ] **Re-run Study A** to populate `template_elastic_dist` column (currently all NA).
+  Template quality conclusions are provisional until this is done.
+  Submitted as job 5131463 on LRZ (2026-03-10). Also includes tf "Fix CC warp
+  monotonicity" (639d19d) — FDA method results may differ from v1.
+
+### Report fixes (applied)
+- [x] Switch ANOVA from Type I SS (`aov()`) to Type II SS (`car::Anova()`) — non-full-
+  factorial design makes Type I η² order-dependent
+- [x] Add noise-conditional heatmaps (noise=0 vs noise=0.3) to overview section
+- [x] Replace MC SE of mean with median [Q25, Q75] in summary tables
+- [x] Add alignment_error section (primary metric, was completely missing from report)
+- [x] Add method × template and method × noise interaction plots
+- [x] Qualify "best general-purpose method" claims with template/noise interaction caveats
+- [x] Fix hardcoded "rankings largely stable" prose → data-driven rank concordance
+- [x] Fix Q5 "invariant to reparameterization" claim → "SRSF L2 distance (upper bound)"
+- [x] Explain FDA noise ratio < 1 (MISE decreasing with noise) — regularization effect
+
+### Study B–E design (tentative, finalize after Study A re-run)
+DGP selections, rationale, and council feedback documented in Section 7.
+Pending implementation tasks:
+- [ ] **Study B (penalization)**: Update `study_b_design()` in `sim-config.R` — add
+  fda_crit1, noise=0.3, DGPs D01/D02/D09/D12, ~33 reps, 8 lambdas
+  `c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)`. Lambda grid calibrated by pilot
+  (job 5131464).
+- [ ] **Study C (grid sensitivity)**: Implement `study_c_design()` in `sim-config.R` —
+  DGPs D01/D03/D04/D09/D12, grid sizes 51/101/201, severity=1.0 only.
+  Also implement grid × lambda cross-check (~1,800 runs).
+- [ ] **Study D (oracle template)**: Update `study_c_design()` → `study_d_design()` in
+  `sim-config.R` — DGPs D01/D03/D09/D10/D13/D14, two conditions (easy + hard).
+- [ ] **Study E (outlier contamination)**: Update `study_d_design()` → `study_e_design()`
+  in `sim-config.R` — DGPs D02/D09/D12, fractions 10%/20%/30%, 2 noise levels.
+  Verify `contaminate_data()` seed determinism for paired fraction comparisons.
+
+### Design considerations
+- [ ] **9 missing DGP cells**: 15/24 is fine for ladders but limits global claims. Affine
+  is particularly sparse (only none and highrank amplitude, no rank1/rank2 → no amplitude
+  ladder for affine). Consider running the 9 missing cells at 1 condition × 50 reps
+  (2,250 runs) as a completeness check.
+- [ ] **Paired analysis**: Seeds are `(dgp, rep)`-based → same data across methods/noise/
+  severity. Current ANOVA and summaries treat runs as independent. Paired within-replicate
+  differences would be more powerful, especially for close races (FDA default vs crit 1).
+- [ ] 100 reps sufficient for large separations but tight for close pooled calls.
+  The top-3 methods are separated by ~1e-4 on harmonic DGPs — within MC noise without
+  paired analysis. Consider 200 reps for the 3–6 most interesting DGPs.
 
 ## Reproducibility
 

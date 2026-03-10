@@ -64,6 +64,7 @@ metric_cols <- c(
   "warp_mise",
   "alignment_error",
   "template_mise",
+  "template_elastic_dist",
   "alignment_cc",
   "time_per_curve",
   "registration_ratio_median",
@@ -154,6 +155,7 @@ make_result_row <- function(task, metrics, error_msg = "") {
     warp_mise = flat$warp_mise %||% NA_real_,
     alignment_error = flat$alignment_error %||% NA_real_,
     template_mise = flat$template_mise %||% NA_real_,
+    template_elastic_dist = flat$template_elastic_dist %||% NA_real_,
     alignment_cc = flat$alignment_cc %||% NA_real_,
     time_per_curve = flat$time_per_curve %||% NA_real_,
     registration_ratio_median = flat$registration_ratio_median %||% NA_real_,
@@ -251,12 +253,13 @@ run_benchmark <- function(study = "pilot", n_cores = 4) {
     B = full_design("B"),
     C = full_design("C"),
     D = full_design("D"),
+    E = full_design("E"),
     pilot = {
       d <- full_design("A")
       d$reps <- 10
       d
     },
-    all = full_design(c("A", "B", "C", "D")),
+    all = full_design(c("A", "B", "C", "D", "E")),
     cli::cli_abort("Unknown study: {study}")
   )
 

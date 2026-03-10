@@ -172,6 +172,41 @@ load_study_a <- function(results_dir = file.path(base_dir, "results")) {
   dt
 }
 
+load_study_b <- function(results_dir = file.path(base_dir, "results")) {
+  files <- list.files(
+    results_dir,
+    pattern = "^results_D\\d+_\\w+_B\\.rds$",
+    full.names = TRUE
+  )
+  if (length(files) == 0) stop("No Study B result files found in ", results_dir)
+
+  dt <- rbindlist(lapply(files, readRDS))
+
+  factors <- dgp_factors()
+  dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
+
+  dt[, dgp := factor(dgp, levels = sort(unique(dgp)))]
+  dt[,
+    method := factor(
+      method,
+      levels = c("srvf", "fda_default", "fda_crit1")
+    )
+  ]
+  dt[, severity := factor(severity)]
+  dt[, noise_sd := factor(noise_sd)]
+  dt[, lambda := as.numeric(lambda)]
+
+  message(sprintf(
+    "Loaded %d rows | %d DGPs | %d methods | %d lambdas | %.1f%% failures",
+    nrow(dt),
+    uniqueN(dt$dgp),
+    uniqueN(dt$method),
+    uniqueN(dt$lambda),
+    100 * mean(dt$failure, na.rm = TRUE)
+  ))
+  dt
+}
+
 # --- Aggregation with MC SEs -------------------------------------------------
 
 mc_summary <- function(dt, metric, by) {
@@ -464,7 +499,6 @@ make_ladder_plot <- function(
 # --- Registration Ratio Plot (Q4) --------------------------------------------
 
 make_reg_ratio_plot <- function(dt) {
-  dlabs <- dgp_short_labels()
   agg <- dt[
     failure == FALSE & !is.na(registration_ratio_median),
     .(
@@ -476,23 +510,26 @@ make_reg_ratio_plot <- function(dt) {
   ]
 
   ggplot2::ggplot(
-    agg[noise_sd == "0" & severity == "0.5"],
+    agg,
     ggplot2::aes(y = method, x = median_ratio, color = method)
   ) +
     ggplot2::geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
-    ggplot2::geom_point(size = 2) +
-    ggplot2::geom_errorbarh(
-      ggplot2::aes(xmin = q25, xmax = q75),
-      height = 0.2
+    ggplot2::geom_jitter(height = 0.15, size = 1.5, alpha = 0.5) +
+    ggplot2::stat_summary(
+      fun = median,
+      geom = "crossbar",
+      width = 0.4,
+      color = "black",
+      linewidth = 0.4
     ) +
-    ggplot2::facet_wrap(
-      ~dgp,
-      nrow = 2,
-      labeller = ggplot2::as_labeller(dlabs)
+    ggplot2::facet_grid(
+      warp_type ~ severity + noise_sd,
+      labeller = cond_labeller
     ) +
     ggplot2::scale_color_manual(
       values = method_colors(),
-      labels = method_labels()
+      labels = method_labels(),
+      guide = "none"
     ) +
     ggplot2::scale_y_discrete(labels = method_labels()) +
     ggplot2::scale_x_continuous(
@@ -504,8 +541,7 @@ make_reg_ratio_plot <- function(dt) {
       x = expression("Registration ratio (" * log[2] * " scale)"),
       y = NULL
     ) +
-    theme_benchmark() +
-    ggplot2::theme(legend.position = "none")
+    theme_benchmark()
 }
 
 # --- DGP Gallery --------------------------------------------------------------

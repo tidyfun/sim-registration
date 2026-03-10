@@ -1,0 +1,451 @@
+---
+title: "Registration Benchmark v2 — Study B: Penalization"
+subtitle: "Internal Report — tf Package"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+    self-contained: true
+execute:
+  cache: true
+  warning: false
+  message: false
+---
+
+# Setup {.unnumbered}
+
+```{r}
+#| label: setup
+#| cache: false
+library(ggplot2)
+library(data.table)
+library(patchwork)
+
+base_dir <- here::here()
+source(file.path(base_dir, "sim-analyze.R"))
+
+mcols <- method_colors()
+mlabs <- method_labels()
+dlabs <- dgp_short_labels()
+```
+
+```{r}
+#| label: load-data
+dt <- load_study_b()
+```
+
+Study B tests whether regularization (lambda > 0) can rescue registration methods
+in regimes where they struggle. Design: 4 DGPs $\times$ 8 lambdas $\times$ 3 methods
+(SRVF, FDA default, FDA crit1) $\times$ 3 noise $\times$ 2 severity $\times$ 33 reps
+= 19,008 runs.
+
+Lambda grid calibrated by pilot (job 5131464):
+`c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)`.
+
+```{r}
+#| label: overview
+#| results: asis
+cat(sprintf("- Rows: %d | Failures: %d (%.1f%%)\n",
+  nrow(dt), sum(dt$failure), 100 * mean(dt$failure)))
+cat(sprintf("- DGPs: %s\n", paste(levels(dt$dgp), collapse = ", ")))
+cat(sprintf("- Methods: %s\n", paste(levels(dt$method), collapse = ", ")))
+cat(sprintf("- Lambdas: %s\n", paste(sort(unique(dt$lambda)), collapse = ", ")))
+cat(sprintf("- Noise: %s\n", paste(levels(dt$noise_sd), collapse = ", ")))
+```
+
+# MISE vs Lambda Curves {#sec-mise-lambda}
+
+The core question: does the MISE-vs-lambda curve show a U-shape (optimal lambda > 0)?
+
+```{r}
+#| label: mise-lambda-curves
+#| fig-height: 12
+#| fig-cap: "Median warp MISE vs lambda for each method, faceted by DGP (rows) and noise level (columns). Dashed horizontal line = lambda=0 baseline. Points show median across reps; error bars show IQR."
+agg <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, severity, lambda)
+]
+
+# Baseline (lambda = 0) for reference lines
+baseline <- agg[lambda == 0, .(method, dgp, noise_sd, severity, base = mise)]
+
+ggplot(agg[severity == "1"],
+  aes(x = lambda + 1e-5, y = mise, color = method)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, alpha = 0.4) +
+  geom_hline(data = baseline[severity == "1"],
+    aes(yintercept = base, color = method),
+    linetype = "dashed", alpha = 0.5) +
+  facet_grid(dgp ~ noise_sd,
+    scales = "free_y",
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise = ", x),
+      dgp = dlabs)) +
+  scale_x_log10(
+    breaks = c(1e-5, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10),
+    labels = c("0", "1e-4", "1e-3", "0.01", "0.05", "0.1", "1", "10")) +
+  scale_color_manual(values = mcols, labels = mlabs) +
+  scale_y_log10() +
+  labs(x = expression(lambda ~ "(log scale)"),
+    y = "Warp MISE (median, log scale)",
+    color = "Method") +
+  theme_benchmark() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: mise-lambda-sev05
+#| fig-height: 12
+#| fig-cap: "Same as above but for severity = 0.5."
+ggplot(agg[severity == "0.5"],
+  aes(x = lambda + 1e-5, y = mise, color = method)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, alpha = 0.4) +
+  geom_hline(data = baseline[severity == "0.5"],
+    aes(yintercept = base, color = method),
+    linetype = "dashed", alpha = 0.5) +
+  facet_grid(dgp ~ noise_sd,
+    scales = "free_y",
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise = ", x),
+      dgp = dlabs)) +
+  scale_x_log10(
+    breaks = c(1e-5, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10),
+    labels = c("0", "1e-4", "1e-3", "0.01", "0.05", "0.1", "1", "10")) +
+  scale_color_manual(values = mcols, labels = mlabs) +
+  scale_y_log10() +
+  labs(x = expression(lambda ~ "(log scale)"),
+    y = "Warp MISE (median, log scale)",
+    color = "Method") +
+  theme_benchmark() +
+  theme(legend.position = "bottom")
+```
+
+# Optimal Lambda {#sec-optimal}
+
+```{r}
+#| label: optimal-lambda
+#| results: asis
+best <- dt[failure == FALSE,
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, severity, lambda)
+]
+optimal <- best[, .SD[which.min(mise)], by = .(method, dgp, noise_sd, severity)]
+
+cat("## Optimal lambda per method x DGP x condition\n\n")
+opt_wide <- dcast(
+  optimal[, .(method, dgp, severity, noise_sd, lambda)],
+  method + dgp + severity ~ noise_sd,
+  value.var = "lambda"
+)
+knitr::kable(opt_wide, caption = "Optimal lambda by method, DGP, and severity. Columns show noise levels.")
+```
+
+```{r}
+#| label: optimal-lambda-findings
+#| results: asis
+# Check if optimal lambda shifts with noise
+cat("\n## Does optimal lambda shift with noise?\n\n")
+for (m in levels(dt$method)) {
+  sub <- optimal[method == m]
+  # Show median optimal lambda per noise level (pooling DGPs and severity)
+  by_noise <- sub[, .(
+    med_lambda = median(lambda),
+    n_zero = sum(lambda == 0),
+    n_total = .N
+  ), by = noise_sd]
+  cat(sprintf("- **%s**: median optimal λ shifts across noise: %s. ",
+    mlabs[m],
+    paste(sprintf("noise=%s → %g (%d/%d at λ=0)",
+      by_noise$noise_sd, by_noise$med_lambda,
+      by_noise$n_zero, by_noise$n_total), collapse = "; ")))
+  # Flag boundary hits
+  n_boundary <- sum(sub$lambda == max(sub$lambda))
+  if (n_boundary > 0) {
+    cat(sprintf("**%d/%d cells hit boundary (λ=%g).**",
+      n_boundary, nrow(sub), max(sub$lambda)))
+  }
+  cat("\n")
+}
+```
+
+# Improvement from Penalization {#sec-improvement}
+
+How much does the best lambda improve over lambda=0?
+
+**Note:** This is an *oracle* analysis — the optimal lambda is selected ex post from
+the same data used to evaluate it. Ratios $\leq 1$ by construction (the baseline
+lambda=0 is always in the candidate set). The practical benefit of penalization
+depends on whether a good lambda can be selected a priori or via cross-validation.
+
+```{r}
+#| label: improvement-heatmap
+#| fig-height: 8
+#| fig-cap: "Improvement ratio: MISE(optimal lambda) / MISE(lambda=0). Values < 1 mean penalization helps. Color scale: green = large improvement, white = no change, red = lambda hurts."
+base <- best[lambda == 0, .(method, dgp, noise_sd, severity, base_mise = mise)]
+merged <- merge(optimal, base, by = c("method", "dgp", "noise_sd", "severity"))
+merged[, ratio := mise / base_mise]
+
+ggplot(merged,
+  aes(x = interaction(noise_sd, severity, sep = " / sev="),
+    y = interaction(dgp, method, sep = " : "),
+    fill = ratio)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f\n(λ=%g)", ratio, lambda)),
+    size = 2.5) +
+  scale_fill_gradient2(low = "#2ca02c", mid = "white", high = "#d62728",
+    midpoint = 1, limits = c(0, 1.5), oob = scales::squish) +
+  labs(x = "noise / severity",
+    y = "DGP : Method",
+    fill = "MISE ratio\n(vs λ=0)") +
+  theme_benchmark() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#| label: improvement-findings
+#| results: asis
+cat("**Findings:**\n\n")
+
+# Biggest winners
+big_win <- merged[ratio < 0.8][order(ratio)]
+if (nrow(big_win) > 0) {
+  cat("Cases where penalization improves MISE by >20%:\n\n")
+  for (i in seq_len(min(nrow(big_win), 10))) {
+    r <- big_win[i]
+    cat(sprintf("- %s on %s (noise=%s, sev=%s): %.0f%% improvement at λ=%g\n",
+      mlabs[r$method], r$dgp, r$noise_sd, r$severity,
+      100 * (1 - r$ratio), r$lambda))
+  }
+}
+
+# Cases where lambda hurts
+hurt <- merged[ratio > 1.05]
+if (nrow(hurt) > 0) {
+  cat(sprintf("\nCases where best lambda *hurts* (ratio > 1.05): %d/%d\n",
+    nrow(hurt), nrow(merged)))
+}
+cat("\n")
+```
+
+# FDA Criterion Comparison {#sec-criteria}
+
+Does fda_crit1 respond differently to lambda than fda_default?
+
+```{r}
+#| label: criteria-comparison
+#| fig-height: 8
+#| fig-cap: "Direct comparison of fda_default vs fda_crit1 MISE across lambda values. Each panel is a DGP × noise combination at severity=1.0."
+fda_dt <- dt[failure == FALSE & method %in% c("fda_default", "fda_crit1")]
+fda_agg <- fda_dt[severity == "1",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, lambda)
+]
+
+ggplot(fda_agg,
+  aes(x = lambda + 1e-5, y = mise, color = method)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_grid(dgp ~ noise_sd,
+    scales = "free_y",
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise = ", x),
+      dgp = dlabs)) +
+  scale_x_log10(
+    breaks = c(1e-5, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10),
+    labels = c("0", "1e-4", "1e-3", "0.01", "0.05", "0.1", "1", "10")) +
+  scale_color_manual(values = mcols, labels = mlabs) +
+  scale_y_log10() +
+  labs(x = expression(lambda ~ "(log scale)"),
+    y = "Warp MISE (median, log scale)",
+    color = "Method") +
+  theme_benchmark() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: criteria-findings
+#| results: asis
+# Compare optimal lambdas for the two FDA methods
+fda_opt <- optimal[method %in% c("fda_default", "fda_crit1")]
+fda_comp <- dcast(
+  fda_opt[, .(method, dgp, noise_sd, severity, lambda, mise)],
+  dgp + noise_sd + severity ~ method,
+  value.var = list("lambda", "mise")
+)
+
+cat("**FDA criterion comparison:**\n\n")
+cat("- Optimal lambda tends to be ",
+  if (median(fda_comp$lambda_fda_crit1, na.rm = TRUE) >
+      median(fda_comp$lambda_fda_default, na.rm = TRUE))
+    "**higher**" else "**lower**",
+  " for fda_crit1 than fda_default across conditions.\n", sep = "")
+
+# Which criterion wins at its own optimal lambda?
+fda_comp[, crit1_wins := mise_fda_crit1 < mise_fda_default]
+cat(sprintf("- At each method's optimal lambda, fda_crit1 wins in %d/%d conditions.\n",
+  sum(fda_comp$crit1_wins, na.rm = TRUE), nrow(fda_comp)))
+cat("\n")
+```
+
+# SRVF Lambda Behavior {#sec-srvf}
+
+SRVF's lambda response is expected to differ qualitatively from FDA methods.
+
+```{r}
+#| label: srvf-detail
+#| fig-height: 6
+#| fig-cap: "SRVF warp MISE vs lambda across all DGPs and noise levels (severity=1.0). The lambda response ranges from 'U-shape' (lambda helps) to 'monotone increasing' (lambda only hurts)."
+srvf_agg <- dt[failure == FALSE & method == "srvf" & severity == "1",
+  .(mise = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)),
+  by = .(dgp, noise_sd, lambda)
+]
+
+ggplot(srvf_agg,
+  aes(x = lambda + 1e-5, y = mise, color = noise_sd)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  geom_ribbon(aes(ymin = q25, ymax = q75, fill = noise_sd),
+    alpha = 0.15, color = NA) +
+  facet_wrap(~dgp, scales = "free_y", labeller = as_labeller(dlabs)) +
+  scale_x_log10(
+    breaks = c(1e-5, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10),
+    labels = c("0", "1e-4", "1e-3", "0.01", "0.05", "0.1", "1", "10")) +
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_y_log10() +
+  labs(x = expression(lambda ~ "(log scale)"),
+    y = "Warp MISE (median ± IQR, log scale)",
+    color = "Noise", fill = "Noise") +
+  theme_benchmark() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: srvf-findings
+#| results: asis
+srvf_opt <- optimal[method == "srvf"]
+cat("**SRVF lambda findings:**\n\n")
+
+for (d in levels(dt$dgp)) {
+  sub <- srvf_opt[dgp == d]
+  lambdas <- sub[, .(noise_sd, lambda, mise)]
+  cat(sprintf("- **%s** (%s): optimal λ = %s\n",
+    d, dlabs[d],
+    paste(sprintf("%g (noise=%s)", lambdas$lambda, lambdas$noise_sd),
+      collapse = ", ")))
+}
+cat("\n")
+
+# Does lambda ever help SRVF substantially?
+srvf_merged <- merge(srvf_opt, base[method == "srvf"],
+  by = c("method", "dgp", "noise_sd", "severity"))
+srvf_merged[, ratio := mise / base_mise]
+helps <- srvf_merged[ratio < 0.9]
+if (nrow(helps) > 0) {
+  cat(sprintf("Lambda helps SRVF (>10%% improvement) in %d/%d conditions:\n",
+    nrow(helps), nrow(srvf_merged)))
+  for (i in seq_len(nrow(helps))) {
+    r <- helps[i]
+    cat(sprintf("  - %s noise=%s sev=%s: %.0f%% at λ=%g\n",
+      r$dgp, r$noise_sd, r$severity, 100*(1-r$ratio), r$lambda))
+  }
+} else {
+  cat("Lambda does not substantially help SRVF (>10%) in any condition.\n")
+}
+cat("\n")
+```
+
+# Template Quality under Penalization {#sec-template}
+
+Does lambda affect template estimation quality?
+
+```{r}
+#| label: template-lambda
+#| fig-height: 8
+#| fig-cap: "Template MISE vs lambda. Penalization can improve template estimation by smoothing the iterative estimation."
+tmpl_agg <- dt[failure == FALSE & severity == "1",
+  .(tmise = median(template_mise, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, lambda)
+]
+
+ggplot(tmpl_agg,
+  aes(x = lambda + 1e-5, y = tmise, color = method)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.5) +
+  facet_grid(dgp ~ noise_sd,
+    scales = "free_y",
+    labeller = labeller(
+      noise_sd = function(x) paste0("noise = ", x),
+      dgp = dlabs)) +
+  scale_x_log10(
+    breaks = c(1e-5, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10),
+    labels = c("0", "1e-4", "1e-3", "0.01", "0.05", "0.1", "1", "10")) +
+  scale_color_manual(values = mcols, labels = mlabs) +
+  scale_y_log10() +
+  labs(x = expression(lambda ~ "(log scale)"),
+    y = "Template MISE (median, log scale)",
+    color = "Method") +
+  theme_benchmark() +
+  theme(legend.position = "bottom")
+```
+
+# Summary {#sec-summary}
+
+```{r}
+#| label: summary-table
+#| results: asis
+# Summary table: best lambda and improvement per method x DGP
+summary_dt <- merge(optimal, base, by = c("method", "dgp", "noise_sd", "severity"))
+summary_dt[, improvement := sprintf("%.0f%%", 100 * (1 - mise / base_mise))]
+summary_dt[, cell := sprintf("λ=%g (%s)", lambda, improvement)]
+
+summary_wide <- dcast(
+  summary_dt[severity == "1", .(method, dgp, noise_sd, cell)],
+  method + dgp ~ noise_sd,
+  value.var = "cell"
+)
+
+cat("## Optimal lambda and improvement at severity=1.0\n\n")
+knitr::kable(
+  summary_wide[order(method, dgp)],
+  caption = "Optimal lambda and MISE improvement vs lambda=0, by method × DGP × noise (severity=1.0)."
+)
+```
+
+```{r}
+#| label: summary-findings
+#| results: asis
+cat("## Key takeaways\n\n")
+
+# Count how often lambda > 0 is optimal
+n_helps <- nrow(optimal[lambda > 0])
+n_total <- nrow(optimal)
+cat(sprintf("- Lambda > 0 is optimal in %d/%d (%.0f%%) of method × DGP × condition cells.\n",
+  n_helps, n_total, 100 * n_helps / n_total))
+
+# Biggest beneficiary
+biggest <- merged[which.min(ratio)]
+cat(sprintf("- Largest improvement: %s on %s (noise=%s, sev=%s) — %.0f%% at λ=%g.\n",
+  mlabs[biggest$method], biggest$dgp, biggest$noise_sd, biggest$severity,
+  100 * (1 - biggest$ratio), biggest$lambda))
+
+# Method that benefits most on average
+avg_by_method <- merged[, .(mean_ratio = mean(ratio, na.rm = TRUE)), by = method]
+best_method <- avg_by_method[which.min(mean_ratio)]
+cat(sprintf("- Method benefiting most from penalization on average: %s (mean ratio %.2f).\n",
+  mlabs[best_method$method], best_method$mean_ratio))
+cat("\n")
+```

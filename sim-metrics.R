@@ -157,32 +157,22 @@ compute_template_mise <- function(template_est, template_true) {
   as.numeric(tf_integrate(sq_diff))
 }
 
-#' Template elastic distance (Fisher-Rao / SRSF distance)
+#' Template elastic distance (Fisher-Rao amplitude distance)
 #'
-#' Computes ||SRSF(f_est) - SRSF(f_true)||_L2 where
-#' SRSF q(t) = sign(f'(t)) * sqrt(|f'(t)|).
-#' This measures template shape distance invariant to reparameterization,
-#' unlike L2 MISE which conflates shape and phase error.
+#' Computes the reparameterization-invariant amplitude distance between
+#' estimated and true templates using the Fisher-Rao framework:
+#'   d_a(f,g) = min_gamma ||q_f - (q_g o gamma) sqrt(gamma')||_L2
+#' where q_f is the SRSF of f. Uses fdasrvf's DP alignment to find
+#' the optimal reparameterization, then computes aligned SRSF L2 distance.
+#'
+#' Unlike L2 MISE, this is invariant to phase shifts in the estimated template.
 compute_template_elastic_dist <- function(template_est, template_true, arg) {
-  d_est <- tf_derive(template_est)
-  d_true <- tf_derive(template_true)
+  f_est <- as.numeric(tf_evaluations(template_est)[[1]])
+  f_true <- as.numeric(tf_evaluations(template_true)[[1]])
 
-  srsf <- function(d) {
-    vals <- tf_evaluations(d)[[1]]
-    sign(vals) * sqrt(abs(vals))
-  }
-
-  q_est <- srsf(d_est)
-  q_true <- srsf(d_true)
-
-  # L2 distance via trapezoidal rule on the derivative grid
-  # tf_arg returns plain numeric vector for tfd_reg, not a list
-  d_arg <- as.numeric(tf_arg(d_est))
-  sq_diff <- (q_est - q_true)^2
-  # Trapezoidal integration
-  dt <- diff(d_arg)
-  mid <- (sq_diff[-length(sq_diff)] + sq_diff[-1]) / 2
-  sqrt(sum(mid * dt))
+  # elastic.distance returns Dy (amplitude) and Dx (phase) distances
+  ed <- fdasrvf::elastic.distance(f_est, f_true, time = arg)
+  ed$Dy
 }
 
 # --- Secondary Metrics --------------------------------------------------------
