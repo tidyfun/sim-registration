@@ -244,6 +244,12 @@ Lambda pilot findings (2 DGPs × 10 lambdas × 3 methods × 3 noise × 10 reps =
 - fda_crit1 vs fda_default: criterion choice interacts with lambda (pilot-confirmed)
 - Does lambda rescue SRVF at noise=0.3? (pilot suggests: only on D02, not D12)
 
+**Remaining question after analysis**: Study B identifies oracle-optimal lambdas, but
+it does not yet answer the practical tuning problem. The next step is a small
+follow-up comparing simple data-adaptive rules (for example, GCV or a coarse
+held-out criterion) against the oracle benchmark to test whether most of the
+penalization gain is recoverable in practice.
+
 ### Study C: Grid resolution sensitivity (~11,250 runs)
 5 DGPs x 3 grid sizes (51, 101, 201) x 3 noise (0, 0.1, 0.3)
 x 5 methods x severity=1.0 = 225 cells x 50 reps
@@ -293,6 +299,11 @@ Run D02 at grid={101, 201} × lambda={0, 0.01, 0.1} × noise={0, 0.3} for SRVF
 only, 50 reps. Can be framed as a Study C extension or a small Study F.
 [Council R4: raised by all 3 reviewers as a key cross-study interaction]
 
+**Follow-up direction**: If SRVF grid sensitivity remains substantial after the
+cross-check, test simple stabilization strategies rather than treating grid
+resolution as fixed nuisance variation: coarse-to-fine fitting, pre-smoothing,
+derivative regularization, or other noise-aware preprocessing.
+
 ### Study D: Oracle template (~6,000 runs)
 6 DGPs x 2 template modes (oracle, estimated) x 5 methods
 x 2 conditions = 120 cells x 50 reps
@@ -340,6 +351,12 @@ remaining warp MISE is purely from the warp estimation algorithm.
 - Condition-conditional: does oracle benefit grow from easy → hard as expected?
 - Template MISE in estimated mode as sanity check (should be ~0 in oracle mode)
 
+**Interpretation caveat**: As implemented, this remains a joint comparison of
+"estimated template + iterative refinement" versus "oracle template + single-pass"
+because tf's supplied-template path fixes `max_iter = 1`. Study D is therefore a
+strong diagnostic for template sensitivity, but not yet a clean ablation of
+template quality alone.
+
 ### Study E: Outlier contamination (~9,000 runs)
 3 DGPs x 2 outlier types (shape, phase) x 3 fractions (10%, 20%, 30%)
 x 5 methods x 2 noise (0.1, 0.3) x severity=0.5 = 180 cells x 50 reps
@@ -372,11 +389,18 @@ or extreme warping). Relevant for practical use where data cleaning is imperfect
   the practical minimum for stable results. [Council R4: Codex]
 
 **Outlier types**:
-- **Shape outliers**: Random sinusoids scaled to ~2x template range. These curves have
-  the wrong shape entirely — a well-functioning method should downweight or exclude them.
-- **Phase outliers**: Extreme warps (severity=3.0, 6× default). These curves have the
-  right shape but extreme time warping — tests whether iterative methods (FDA, SRVF)
+- **Shape outliers**: Random sinusoids added to template, then z-scored to match inlier
+  pointwise mean and standard deviation. This produces pure shape outliers without
+  magnitude differences. Noise is added at the same level as inliers.
+- **Phase outliers**: Extreme warps (severity=3.0, 6× default) applied to template.
+  Noise added at the same level as inliers. Tests whether iterative methods (FDA, SRVF)
   get pulled toward extreme warps.
+
+**Per-curve metrics on inliers only**: Outlier curves have no meaningful ground-truth
+warps (shape outliers) or have extreme warps that shouldn't be recovered (phase outliers).
+Warp MISE, alignment error, and other per-curve metrics are computed on inlier curves
+only. Template metrics (MISE, elastic distance) use all curves since template quality
+IS affected by outlier contamination.
 
 **Implementation note**: Verify that `contaminate_data()` uses deterministic outlier
 selection given the same base seed, so that paired comparison across contamination
@@ -392,6 +416,10 @@ adding more). [Council R4: Claude]
 - Report failure rates explicitly — conditional-on-success comparisons are biased
   if failure probability changes with contamination [Council R4: Codex]
 
+**Interpretation caveat**: Robustness rankings are metric-dependent. Warp MISE,
+alignment error, template MISE, and elastic distance need to be reported side by
+side rather than collapsed to a single global "most robust" method.
+
 **Total: ~45,850 runs (Studies B–E + grid×lambda cross-check) + 45,000 (Study A) ≈ 91,000 runs**
 
 ## 8. Code Structure
@@ -403,14 +431,24 @@ sim-registration/            Standalone repo (~/fda/sim-registration/)
   sim-dgp.R          ~500 lines   Templates, warps, amplitude, generate_data()
   sim-methods.R       ~110 lines   5 method wrappers returning tf_registration
   sim-metrics.R       ~300 lines   All metrics using tf API (incl. SRSF elastic dist)
-  sim-config.R        ~220 lines   All study designs (A-E)
+  sim-config.R        ~280 lines   All study designs (A-E)
   sim-run.R           ~300 lines   Runner with incremental saves per DGP
   sim-validate.R      ~150 lines   Known-answer tests for v2
-  sim-analyze.R       ~340 lines   Data loading, aggregation, plot helpers
-  sim-report.qmd    ~1200 lines   Quarto report (Study A analysis)
+  sim-analyze.R       ~1000 lines  Data loading, aggregation, plot helpers
+  sim-report-main.qmd ~1700 lines  Quarto report (Study A analysis)
+  sim-report-penalization.qmd      Quarto report (Study B)
+  sim-report-grid.qmd              Quarto report (Study C: grid sensitivity)
+  sim-report-oracle.qmd            Quarto report (Study D: oracle template)
+  sim-report-outlier.qmd ~950 lines Quarto report (Study E: outlier contamination)
+  sim-pilot-grid.R                 Grid pilot script
+  sim-pilot-lambda.R               Lambda pilot script
+  sim-pilot-grid-study.R           Study C pilot script
+  sim-pilot-oracle.R               Study D pilot script
+  sim-pilot-outlier.R              Study E pilot script
   smoke-test.R         ~30 lines   LRZ smoke test (D01, 2 reps)
   study-a-run.R        ~20 lines   Study A production entry point
   run.sh               ~30 lines   Local launch script
+  slurm/               SLURM job scripts (study-a through study-d, pilots)
 ```
 
 ### Key tf-syntax improvements (vs v1)
@@ -531,14 +569,218 @@ Acknowledged but deferred:
 - Batched by (DGP, method): 75 batches, each ~600 runs
 - Results saved as `results_D{nn}_{method}_A.rds`
 
-### Phase 8: Study A Analysis (in progress)
+### Phase 8: Study A Analysis (done)
 - sim-analyze.R: data loading, DGP factor annotation, aggregation helpers
-- sim-report.qmd: Quarto report implementing analysis plan below
+- sim-report-main.qmd: Quarto report implementing analysis plan below (renamed from sim-report.qmd)
 - All findings sections use data-driven `results: asis` code chunks
+- Council Review R5 applied (see below)
 
-### Phases 9+: Sub-studies B–E (pending)
-- DGPs for Studies B–E selected from Study A diagnostics
-- Studies B–E runs, analysis, integrated report
+### Phase 9: Studies C–D implementation and production runs (done)
+
+**sim-config.R rewritten**: Study naming now matches this plan (C=grid, D=oracle,
+E=outlier). Added `study_c_design()`, `study_d_design()`, `study_e_design()`.
+
+**sim-analyze.R extended**: Added `load_study_c()` and `load_study_d()` with
+proper factor construction (n_grid, template_mode, condition).
+
+**sim-run.R extended**: Added Study E support.
+
+**Study C (grid sensitivity)**:
+- Pilot: 3 DGPs × 3 grids × 2 noise × 5 methods × 5 reps = 450 runs (LRZ)
+- Production: job 5131755, 32 cores, serial_std, 6h limit
+- Report: `sim-report-grid.qmd` (created, pending final analysis)
+
+**Study D (oracle template)**:
+- Pilot: 3 DGPs × 2 modes × 2 conditions × 5 methods × 5 reps = 300 runs (LRZ)
+- Production: completed on LRZ, 32 cores, 6000 runs, 10/6000 failures (all landmark_auto)
+- Report: `sim-report-oracle.qmd` (created, council-reviewed, revised)
+- SLURM scripts: `slurm/study-c.slurm`, `slurm/study-d.slurm`, `slurm/pilot-grid-study.slurm`,
+  `slurm/pilot-oracle.slurm`
+
+### Council Review R5: Study D report (done)
+
+Council (Claude, Codex, Gemini) reviewed `sim-report-oracle.qmd`. All three
+reviewers identified the same core issues. Revisions applied:
+
+1. **max_iter confound documented**: New Limitations section explains that oracle
+   mode gets `max_iter=1` (tf internal override when template provided) while
+   estimated mode gets `max_iter=10`. The comparison is "estimated+iterative vs
+   oracle+single-pass", not a pure template ablation.
+2. **Heatmap scale fixed**: Widened from `c(-20, 100)` to `c(-170, 100)` with
+   `oob = scales::squish`. Nine cells were previously misrendered.
+3. **fda_default negative oracle benefit elevated**: New dedicated section
+   explaining two factors (iteration confound + criterion 2 objective mismatch).
+   Contrasted with fda_crit1 which shows much less negative benefit.
+4. **Template-warp correlation conditioned on method**: Landmarks excluded, added
+   within-method correlations, weakened causal language.
+5. **Summary prose fixed**: Removed overclaimed "bottleneck" conclusion, made
+   condition effect method-dependent, scoped conclusions to SRVF where cleanest.
+6. **Caption inaccuracies fixed**: Correlation plot, template quality plot, DGP
+   comparison plot descriptions corrected.
+
+### Study D Key Findings
+
+- **SRVF**: Consistent positive oracle benefit (9–87%), growing from easy→hard.
+  Cleanest evidence that template quality affects warp recovery.
+- **fda_default**: Large negative oracle benefit (-50% to -162% on several DGPs).
+  Estimated-template pipeline outperforms oracle, likely due to iteration confound
+  and co-adaptation of criterion 2 objective with iteratively estimated template.
+- **fda_crit1**: Mostly positive oracle benefit (up to 72%), much less affected
+  by the confound than fda_default — criterion 1 (ISE) is less sensitive to
+  iteration count.
+- **affine_ss**: Mixed results, DGP-dependent.
+- **landmark_auto**: Exactly 0% oracle benefit (expected — ignores template).
+  Serves as valid negative control.
+- **Limitation**: A clean ablation requires modifying `tf_register()` to allow
+  `max_iter > 1` with a supplied template. Left for future study revision.
+
+### Council Review R5: Study A report (done)
+
+Council (Claude, Codex, Gemini) reviewed `sim-report-main.qmd` for validity of
+interpretations and correctness of conclusions. 7 fixes applied:
+
+1. **Affine noise-invariance was pooling artifact**: Pooled elastic distance
+   ratio was 1.0× but per-template was 1.91× (harmonic) and 1.05× (wiggly).
+   Fixed by conditioning on template before summarizing.
+2. **"Complex warps yield higher MISE" claim wrong**: Text said "holds for most
+   methods" but data showed only 43%. Fixed with data-driven conditional wording.
+3. **Hard-coded Affine elastic distance values**: "~1.06 across all noise levels"
+   was a string literal. Replaced with computed values from data.
+4. **SRVF pooled advantage phrasing**: Changed from "template mix" to "effect
+   sizes within templates" to accurately describe what drives the aggregate.
+5. **Amplitude ladder wording**: Softened to "endpoint comparison, not monotonicity"
+   since ladders are not fully monotone for all methods.
+6. **Severity claim scoped**: "Most robust" labeled "at noise=0"; ratio<1 caveat
+   added for cases where higher severity unexpectedly helps.
+7. **mc_summary() n_fail always 0**: Bug fix — failure count was computed inside
+   filtered subset. Now computed from unfiltered data then merged.
+
+### Phase 10: Study B production run and analysis (done)
+
+- `study_b_design()` updated in sim-config.R: 4 DGPs (D01/D02/D09/D12) × 8 lambdas
+  (0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10) × 3 methods (SRVF, fda_default, fda_crit1)
+  × 3 noise × 2 severity × 33 reps = 19,008 runs
+- LRZ job 5131577 (2026-03-10), 32 cores, serial_std, completed in 111 min
+- 0% failures across all 19,008 runs
+- Report: `sim-report-penalization.qmd` (~600 lines)
+- Council Review R1 applied: log scale for MISEs, wider heatmap color scale,
+  lambda=0.05 tick marks, failure rate table
+- Elastic distance metric added to template quality section (Section 6)
+
+### Council Review R2: Study B interpretation (done)
+
+Council (Claude, Codex, Gemini) reviewed Study B for interpretation validity and
+practical recommendations for `tf_register()` lambda default. Key findings:
+
+1. **Oracle improvement ratio ≤ 1 by construction**: lambda=0 is in the candidate
+   set, so "ratio > 1" (lambda hurts) is unreachable in oracle selection. Report
+   text clarified with explicit caveat.
+2. **Median optimal lambda misleading on discrete grid**: Reported phantom values
+   like 0.00055 never evaluated. Fixed: mode + frequency table instead.
+3. **Severity comparison too reassuring**: Optimal lambdas identical across
+   severities in only 10/36 cells. Report notes this heterogeneity.
+4. **Template findings mixed optimization targets**: Selecting lambda by elastic
+   distance then reporting MISE improvement overstates MISE gains. Fixed: each
+   metric optimized independently.
+5. **"fda_crit1 benefits most" too strong**: fda_default wins 21/24 head-to-head
+   FDA cells. Reworded to "FDA methods benefit much more than SRVF".
+6. **No safe fixed non-zero default**: Even best fixed lambdas worsen 1–6/24
+   cells with worst-case 2.6× degradation.
+7. **Boundary hits caveat**: 4 cells hit upper grid edge; report treats "large
+   lambda helps" as unresolved direction, not precise recommendation.
+
+**Software recommendation (council consensus)**: Keep `tf_register()` at lambda=0
+as default. Implement `lambda = "auto"` via GCV or REML-based selection. Make any
+automatic tuning grid method-specific (SRVF and FDA effective lambda scales differ).
+
+### Phase 11: Study E implementation and production run (in progress)
+
+**Study E v1** (2026-03-10): Pilot (job 5131938, 600 runs, 4 min) and production
+(job 5132002, 9000 runs, 34.5 min) completed with 0% failures. Report:
+`sim-report-outlier.qmd` with DGP gallery, degradation curves, heatmaps,
+alignment error analysis, case study visualization.
+
+**Study E v2 redesign** (2026-03-11): Three design improvements identified during
+analysis of v1 results:
+1. **Noise on outlier curves**: Phase outliers were noise-free (`template(extreme_warp(t))`);
+   now noise is added matching inlier noise level. Shape outliers also get noise.
+2. **Shape outlier standardization**: v1 shape outliers were magnitude outliers too
+   (~2× template range). Now z-scored to match inlier pointwise mean/sd — pure shape
+   outliers only.
+3. **Inlier-only per-curve metrics**: Outlier curves have no meaningful ground-truth
+   warps, so warp MISE, alignment error, alignment CC, registration ratio, amplitude
+   variance ratio, and warp slope ratio now computed on inlier curves only. Template
+   metrics (MISE, elastic distance) still use all curves (template quality IS affected
+   by outliers).
+
+Code changes applied:
+- `sim-dgp.R`: `contaminate_data()` gains `noise_sd` param, shape outlier
+  standardization block, phase outlier noise addition
+- `sim-metrics.R`: `extract_metrics()` gains `outlier_mask` param, subsets
+  per-curve metrics to inliers
+- `sim-run.R`: passes `noise_sd` and `outlier_mask` through
+- `sim-analyze.R`: `make_contam_example()` passes `noise_sd`; new
+  `make_contam_case_study()` for registration visualization case study
+
+v2 production run: job 5132186 on LRZ (2026-03-11), 32 cores, 6h limit.
+Awaiting completion.
+
+**Report additions** (v2):
+- Case study subsection: D12 + 20% phase contamination showing SRVF elastic
+  distance paradoxically *improving* under contamination (0.703 → 0.557, ratio 0.79)
+  while template MISE doubles. All 5 methods shown side by side, clean vs contaminated.
+- Multi-metric robustness heatmaps: warp MISE, alignment error, template MISE,
+  elastic distance degradation at 30% contamination.
+- Alignment error degradation curves and ratio tables.
+
+### Phases 12+: Cross-study analyses (pending)
+- Grid × lambda cross-check (Study C extension): ~1,800 runs, pending
+- Cross-study synthesis and integrated report
+- Matched-iteration oracle study (Study D extension): modify or wrap `tf_register()`
+  so oracle-template runs can use the same `max_iter` as estimated-template runs
+- Practical lambda-selection study (Study B extension): test whether simple
+  data-adaptive tuning approximates oracle gains
+- Broader robustness extension (Study E extension): add missingness, local spikes,
+  heavy tails, and mixed amplitude+phase contamination
+- External-validity check: add at least one semi-real or held-out real-data
+  evaluation to test whether the simulation findings transfer
+
+### Cross-study synthesis after Studies A-E
+
+**What the current benchmark succeeded at**:
+- The studies work well as a **failure-mode map**: they identify where each
+  method breaks under noise, grid changes, oracle-vs-estimated templates, and
+  contamination.
+- The studies do **not** yet support a universal leaderboard. Relative
+  performance depends strongly on the metric (warp recovery, alignment, template
+  recovery, or robustness) and on the operating regime.
+
+**Major unresolved questions exposed by the results**:
+- **Template estimation vs iterative refinement**: Study D shows large method
+  differences, especially for `fda_default`, but the oracle comparison is still
+  confounded by iteration count. A matched-iteration ablation is needed before
+  treating oracle benefit as pure template sensitivity.
+- **Practical tuning versus oracle tuning**: Study B shows that penalization can
+  help a great deal, especially for FDA methods, but it remains unclear whether a
+  practitioner can choose lambda reliably without oracle access.
+- **Metric hierarchy**: Warp MISE, alignment error, template MISE, and elastic
+  distance do not induce the same rankings. The benchmark still needs a clearer
+  statement of which estimand/metric is primary for overall conclusions.
+- **External validity**: The DGP suite is rich, but still simulation-bound.
+  Conclusions are strongest as within-benchmark comparisons, not yet as general
+  recommendations for arbitrary functional registration problems.
+
+**Method-specific behavior still needing explanation**:
+- `fda_default` remains the strangest case: it often benefits most from lambda,
+  yet can show negative oracle benefit, suggesting criterion-2-specific
+  co-adaptation or iteration effects that are not fully understood.
+- `srvf` has two distinct regimes: very strong in clean settings and on template
+  shape, but unusually fragile to noise and grid resolution. That mechanism is
+  plausible but still not fully pinned down.
+- `landmark_auto` looks robust by warp-MISE degradation under contamination, but
+  also tends to under-register and is not uniformly strong on alignment-oriented
+  summaries. It is still unclear whether this reflects desirable conservatism or
+  systematic underfitting.
 
 ## 10. Study A Analysis Plan
 
@@ -703,9 +945,32 @@ speculative findings (6/7 original speculative findings were factually wrong).
   Methods have qualitatively different lambda profiles (documented in Section 7).
 - Study B–E DGP selections are tentative (documented in Section 7). Finalize after
   Study A re-run based on actual method rankings, interaction patterns, and failure rates.
-- Metric hierarchy: template MISE and elastic distance are strongly correlated (ρ=0.85).
-  Clarify which is primary and which is confirmatory for Studies B–E to avoid redundant
-  testing. [Council R4: Codex]
+- Metric hierarchy: template MISE and elastic distance are strongly correlated (ρ=0.82
+  in Study A). Both reported; elastic distance is primary for template shape quality,
+  MISE for overall fit including phase error. Study B confirmed they can disagree on
+  optimal lambda — each metric must be optimized independently. Study E revealed
+  dramatic divergence under contamination: Landmark has worst MISE degradation (~28×)
+  but only moderate elastic distance degradation (~2×) — outliers shift template
+  position without distorting shape. SRVF elastic distance can paradoxically *improve*
+  under phase contamination (verified in case study: D12, ratio 0.79).
+- Oracle interpretation: Study D is informative but not yet a clean template-only
+  ablation because the oracle path uses `max_iter = 1`. A matched-iteration oracle
+  study is still needed to separate template quality from iterative refinement.
+- Practical lambda tuning: Study B resolves the oracle-selection question but not
+  the user-facing one. Need to test whether a simple automatic rule can recover
+  most of the gain from penalization without introducing frequent degradations.
+- SRVF stabilization: Study C and Study B together suggest that some of SRVF's
+  weakness may be implementation-sensitive (grid/noise/derivative amplification)
+  rather than intrinsic. This motivates explicit smoothing or coarse-to-fine
+  variants as a future method study, not just more benchmarking.
+- Robustness scope: Study E covers shape and phase outliers, but practical data
+  problems also include missingness, local spikes, heavy tails, and mixed
+  amplitude+phase contamination.
+- External validation: Add a semi-real or held-out real-data check before turning
+  within-benchmark findings into broad method recommendations.
+- ~~Lambda default for tf_register()~~ **Resolved**: Council R2 consensus — keep
+  lambda=0 as default. Implement `lambda = "auto"` via GCV. Method-specific tuning
+  grids needed (SRVF and FDA effective lambda scales differ by orders of magnitude).
 
 ## TODO (from Council Review R3)
 
@@ -716,10 +981,10 @@ Council of 4 AI agents reviewed the Study A report and code. Key issues to addre
   now uses `fdasrvf::elastic.distance()` for proper Fisher-Rao amplitude distance.
   Verified in grid-size pilot (job 5131384): values range 0.2–2.6, ρ=0.85 with
   template MISE, sensible DGP/method patterns.
-- [ ] **Re-run Study A** to populate `template_elastic_dist` column (currently all NA).
-  Template quality conclusions are provisional until this is done.
-  Submitted as job 5131463 on LRZ (2026-03-10). Also includes tf "Fix CC warp
-  monotonicity" (639d19d) — FDA method results may differ from v1.
+- [x] **Re-run Study A** to populate `template_elastic_dist` column.
+  Completed: job 5131463 on LRZ (2026-03-10), 185 min, 45,000 rows, 0% failures.
+  Elastic distance now available: range [0.015, 2.7], Spearman ρ=0.82 with template MISE.
+  tf updated to 639d19d ("Fix CC warp monotonicity").
 
 ### Report fixes (applied)
 - [x] Switch ANOVA from Type I SS (`aov()`) to Type II SS (`car::Anova()`) — non-full-
@@ -736,18 +1001,26 @@ Council of 4 AI agents reviewed the Study A report and code. Key issues to addre
 ### Study B–E design (tentative, finalize after Study A re-run)
 DGP selections, rationale, and council feedback documented in Section 7.
 Pending implementation tasks:
-- [ ] **Study B (penalization)**: Update `study_b_design()` in `sim-config.R` — add
-  fda_crit1, noise=0.3, DGPs D01/D02/D09/D12, ~33 reps, 8 lambdas
-  `c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)`. Lambda grid calibrated by pilot
-  (job 5131464).
-- [ ] **Study C (grid sensitivity)**: Implement `study_c_design()` in `sim-config.R` —
+- [x] **Study B (penalization)**: `study_b_design()` updated, production run completed
+  (job 5131577, 111 min, 19,008 rows, 0% failures). Report: `sim-report-penalization.qmd`.
+  Council-reviewed twice (R1: visualizations, R2: interpretation). Lambda grid calibrated
+  by pilot (job 5131464).
+- [x] **Study C (grid sensitivity)**: `study_c_design()` in `sim-config.R` —
   DGPs D01/D03/D04/D09/D12, grid sizes 51/101/201, severity=1.0 only.
-  Also implement grid × lambda cross-check (~1,800 runs).
-- [ ] **Study D (oracle template)**: Update `study_c_design()` → `study_d_design()` in
-  `sim-config.R` — DGPs D01/D03/D09/D10/D13/D14, two conditions (easy + hard).
-- [ ] **Study E (outlier contamination)**: Update `study_d_design()` → `study_e_design()`
-  in `sim-config.R` — DGPs D02/D09/D12, fractions 10%/20%/30%, 2 noise levels.
-  Verify `contaminate_data()` seed determinism for paired fraction comparisons.
+  Pilot (job on LRZ) and production run (job 5131755) completed.
+  Report: `sim-report-grid.qmd`. Grid × lambda cross-check still pending.
+- [x] **Study D (oracle template)**: `study_d_design()` in `sim-config.R` —
+  DGPs D01/D03/D09/D10/D13/D14, two conditions (easy + hard).
+  Pilot and production run completed on LRZ. Report: `sim-report-oracle.qmd`.
+  Council-reviewed and revised. **Known limitation**: max_iter confound
+  (estimated gets 10 iterations, oracle gets 1 due to `tf_register()` internal
+  override). See Study D findings below.
+- [x] **Study E (outlier contamination)**: `study_e_design()` in `sim-config.R` —
+  DGPs D02/D09/D12, fractions 10%/20%/30%, 2 noise levels (0.1, 0.3), severity=0.5.
+  Seed determinism verified: `sample.int(50, k)` produces nested subsets for paired
+  fraction comparisons. v1 completed (job 5132002), v2 redesign submitted (job 5132186)
+  with noise on outliers, standardized shape outliers, and inlier-only per-curve metrics.
+  Report: `sim-report-outlier.qmd`. SLURM: `slurm/study-e.slurm`, `slurm/pilot-outlier.slurm`.
 
 ### Design considerations
 - [ ] **9 missing DGP cells**: 15/24 is fine for ladders but limits global claims. Affine

@@ -143,6 +143,13 @@ if ("template_elastic_dist" %in% names(dt) &&
 ```
 
 ```{r}
+#| label: heatmap-alignment-error
+#| fig-height: 7
+#| fig-cap: "Median alignment error across all severity/noise conditions. Color = rank within each DGP; yellow = best, purple = worst."
+make_heatmap(dt, "alignment_error", "Alignment error (median, all conditions)")
+```
+
+```{r}
 #| label: heatmap-alignment-cc
 #| fig-height: 7
 #| fig-cap: "Median alignment cross-correlation. Color = rank within each DGP; yellow = best, purple = worst."
@@ -199,25 +206,21 @@ make_winrate_heatmap(dt, "alignment_cc", "Alignment CC win rate (all conditions)
 ```{r}
 #| label: overview-findings
 #| results: asis
-# Rank distribution per method across DGPs
-ranks_all <- dt[failure == FALSE,
-  .(mise = median(warp_mise, na.rm = TRUE)),
-  by = .(dgp, method)
-][, rank := rank(mise), by = dgp]
-
-rank_summary <- ranks_all[,
-  .(mean_rank = round(mean(rank), 1),
-    n_rank1 = sum(rank == 1),
-    n_top2 = sum(rank <= 2)),
-  by = method
-][order(mean_rank)]
+rank_info <- rank_summary_table(
+  dt = dt,
+  metric = "warp_mise",
+  by = c("dgp", "method"),
+  rank_within = "dgp",
+  stat = "median"
+)
+rank_summary <- rank_info$summary[order(mean_rank)]
 
 cat("**Key observations** (pooling over severity and noise):\n\n")
 for (i in seq_len(nrow(rank_summary))) {
   m <- rank_summary$method[i]
   cat(sprintf(
-    "- **%s**: mean rank %.1f, rank 1 on %d/%d DGPs, top 2 on %d/%d DGPs.\n",
-    mlabs[m], rank_summary$mean_rank[i],
+    "- **%s**: mean rank %.1f ± %.1f, rank 1 on %d/%d DGPs, top 2 on %d/%d DGPs.\n",
+    mlabs[m], rank_summary$mean_rank[i], rank_summary$se_rank[i],
     rank_summary$n_rank1[i], uniqueN(dt$dgp),
     rank_summary$n_top2[i], uniqueN(dt$dgp)
   ))
@@ -407,9 +410,16 @@ for (lnm in names(ladders_q2)) {
 }
 
 pct_degrade <- round(100 * n_degrade / n_total)
+if (pct_degrade > 70) {
+  amp_txt <- "The pattern is predominant — higher-rank amplitude generally makes warp recovery harder."
+} else if (pct_degrade > 50) {
+  amp_txt <- "The pattern holds for most cases but has notable exceptions — some methods on some ladders show stable or slightly improved MISE under higher-rank amplitude."
+} else {
+  amp_txt <- "The pattern is **inconsistent** — higher-rank amplitude does not systematically degrade warp recovery across methods and conditions."
+}
 cat(sprintf(
-  "- In %d%% of method-ladder-condition combinations (%d/%d), warp MISE increases with amplitude complexity. The pattern is predominant but not universal — some methods on some ladders show stable or slightly improved MISE under higher-rank amplitude.\n",
-  pct_degrade, n_degrade, n_total
+  "- In %d%% of method-ladder-condition comparisons (%d/%d), warp MISE is higher at the most complex amplitude than at the baseline (endpoint comparison, not monotonicity). %s\n",
+  pct_degrade, n_degrade, n_total, amp_txt
 ))
 
 # Check which method has best absolute MISE at highrank
@@ -477,9 +487,16 @@ for (lnm in names(ladders_w)) {
 pct_worse <- round(100 * n_worse / n_tot_q3)
 
 cat("**Findings:**\n\n")
+if (pct_worse > 60) {
+  q3_txt <- "The effect is predominant — complex warps are harder to recover for most methods and conditions."
+} else if (pct_worse > 40) {
+  q3_txt <- "The effect is **inconsistent** — complex warps are not systematically harder to recover. The direction depends on the method, template type, and noise level."
+} else {
+  q3_txt <- "Counter to expectation, simple warps tend to produce higher MISE."
+}
 cat(sprintf(
-  "- In %d%% of comparisons (%d/%d), complex warps yield higher MISE than simple warps. The pattern holds for most methods and conditions but has exceptions — some methods show comparable or slightly lower MISE on complex vs simple warps in specific settings.\n",
-  pct_worse, n_worse, n_tot_q3
+  "- In %d%% of comparisons (%d/%d), complex warps yield higher MISE than simple warps. %s\n",
+  pct_worse, n_worse, n_tot_q3, q3_txt
 ))
 # Check affine DGPs
 affine_dgps <- dgp_factors()[warp_type == "affine", dgp]
@@ -608,14 +625,19 @@ pattern hidden when pooling over templates.
 ```{r}
 #| label: method-template-interaction
 #| fig-height: 7
-#| fig-cap: "Method × template interaction for warp MISE. Lines connect the same method across template types. Crossing lines indicate rank reversals between templates."
+#| fig-cap: "Method × template interaction for warp MISE. Points show medians and vertical bars show IQRs. Lines connect the same method across template types. Crossing lines indicate rank reversals between templates."
 mt_agg <- dt[failure == FALSE & warp_type != "affine",
-  .(mise = median(warp_mise, na.rm = TRUE)),
+  .(
+    mise = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)
+  ),
   by = .(method, template, noise_sd)]
 
 ggplot(mt_agg, aes(x = template, y = mise, color = method, group = method)) +
   geom_line(linewidth = 0.8) +
   geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.08, alpha = 0.35) +
   facet_wrap(~ noise_sd, labeller = labeller(
     noise_sd = function(x) paste0("noise=", x))) +
   scale_color_manual(values = mcols, labels = mlabs) +
@@ -1029,15 +1051,17 @@ if (has_elastic) {
   agg_both[, rank_e2 := frank(edist), by = .(dgp, severity, noise_sd)]
   wr <- agg_both[, .(win_pct = round(100 * mean(rank_e2 == 1), 1)), by = method][order(-win_pct)]
 
-  # Noise sensitivity ratio (noise=0.3 / noise=0)
+  # Noise sensitivity ratio (noise=0.3 / noise=0), conditioned on template
   noise_sens <- dt[
     failure == FALSE & !is.na(template_elastic_dist) & noise_sd %in% c("0", "0.3"),
     .(edist = median(template_elastic_dist)),
-    by = .(method, noise_sd)
+    by = .(method, template, noise_sd)
   ]
-  wide <- dcast(noise_sens, method ~ noise_sd, value.var = "edist")
+  wide <- dcast(noise_sens, method + template ~ noise_sd, value.var = "edist")
   setnames(wide, c("0", "0.3"), c("e0", "e03"))
-  wide[, ratio := round(e03 / e0, 1)]
+  wide[, ratio := round(e03 / e0, 2)]
+  # Summarize across templates (median of template-specific ratios)
+  wide_pooled <- wide[, .(ratio = round(median(ratio), 1)), by = method]
 
   cat(sprintf(
     "The two metrics agree moderately (Spearman $\\rho$ = %s across cell-level method rankings) but disagree on the best method in **%d of %d** conditions (%.0f%%). Key differences:\n\n",
@@ -1052,23 +1076,25 @@ if (has_elastic) {
     mlabs[wr$method[nrow(wr)]], wr$win_pct[nrow(wr)]
   ))
 
-  # SRVF noise sensitivity
-  srvf_ratio <- wide[method == "srvf", ratio]
-  most_robust <- wide[which.min(ratio)]
+  # Noise sensitivity (template-conditioned to avoid pooling artifacts)
+  srvf_ratio <- wide_pooled[method == "srvf", ratio]
+  most_robust <- wide_pooled[which.min(ratio)]
   cat(sprintf(
-    "- **Noise sensitivity** differs: SRVF elastic distance degrades %.1f× from noise=0 to 0.3, while %s is most robust (%.1f×).\n",
+    "- **Noise sensitivity** (median ratio noise=0.3 / noise=0, conditioned on template): SRVF degrades %.1f×, while %s is most robust (%.1f×).\n",
     srvf_ratio, mlabs[most_robust$method], most_robust$ratio
   ))
-  affine_by_noise <- dt[
-    method == "affine_ss" & failure == FALSE & !is.na(template_elastic_dist),
-    .(med = round(median(template_elastic_dist), 2)),
-    by = noise_sd
-  ]
-  affine_range <- affine_by_noise[, .(lo = min(med), hi = max(med))]
-  cat(sprintf(
-    "- Affine (S+S) elastic distance is essentially **noise-invariant** (median %.2f–%.2f across noise levels) but always high — it consistently distorts template shape regardless of signal quality.\n",
-    affine_range$lo, affine_range$hi
-  ))
+  # Affine: show per-template ratios since pooling can mask heterogeneity
+  affine_by_tpl <- wide[method == "affine_ss"]
+  if (nrow(affine_by_tpl) > 0) {
+    affine_txt <- paste(sprintf("%s: %.1f×", affine_by_tpl$template, affine_by_tpl$ratio),
+      collapse = ", ")
+    cat(sprintf(
+      "- Affine (S+S) noise sensitivity varies by template (%s) — the pooled ratio masks heterogeneity. Elastic distance is always high (median %.2f–%.2f), indicating consistent template shape distortion.\n",
+      affine_txt,
+      min(noise_sens[method == "affine_ss", edist]),
+      max(noise_sens[method == "affine_ss", edist])
+    ))
+  }
 } else {
   cat("*Elastic distance not available in current results.*\n")
 }
@@ -1170,14 +1196,19 @@ by warp type.
 ```{r}
 #| label: method-noise-interaction
 #| fig-height: 7
-#| fig-cap: "Method × noise interaction for warp MISE (severity=1.0). Lines connect noise levels within each method. Diverging lines indicate differential noise sensitivity."
+#| fig-cap: "Method × noise interaction for warp MISE (severity=1.0). Points show medians and vertical bars show IQRs. Lines connect noise levels within each method. Diverging lines indicate differential noise sensitivity."
 mn_agg <- dt[failure == FALSE & severity == "1",
-  .(mise = median(warp_mise, na.rm = TRUE)),
+  .(
+    mise = median(warp_mise, na.rm = TRUE),
+    q25 = quantile(warp_mise, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_mise, 0.75, na.rm = TRUE)
+  ),
   by = .(method, warp_type, noise_sd)]
 
 ggplot(mn_agg, aes(x = noise_sd, y = mise, color = method, group = method)) +
   geom_line(linewidth = 0.8) +
   geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.08, alpha = 0.35) +
   facet_wrap(~ warp_type, scales = "free_y") +
   scale_color_manual(values = mcols, labels = mlabs) +
   scale_y_log10() +
@@ -1502,15 +1533,21 @@ if (same_on_both) {
   h_best <- mlabs[per_tpl[template == "harmonic", best]]
   w_best <- mlabs[per_tpl[template == "wiggly", best]]
   cat(sprintf(
-    "1. **No single best method**: %s is best on wiggly templates, but %s is best on harmonic templates (when pooling over noise). The method:template interaction (@sec-method-template) makes global 'best method' claims misleading. %s achieves the lowest *pooled* median and ranks first on %d of %d DGPs, but this reflects the template mix in the design.\n\n",
+    "1. **No single best method**: %s is best on wiggly templates, but %s is best on harmonic templates (when pooling over noise). The method:template interaction (@sec-method-template) makes global 'best method' claims misleading. %s achieves the lowest *pooled* median and ranks first on %d of %d DGPs, but this reflects effect sizes within templates, not a uniform advantage.\n\n",
     w_best, h_best, mlabs[best_overall], n_wins, n_dgps_dp
   ))
 }
 
 # 2. Amplitude degradation
+best_highrank_sum <- dt[failure == FALSE & amplitude == "highrank",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = method][which.min(mise), method]
+best_none_sum <- dt[failure == FALSE & amplitude == "none",
+  .(mise = median(warp_mise, na.rm = TRUE)),
+  by = method][which.min(mise), method]
 cat(sprintf(
-  "2. **Amplitude variation degrades warp recovery for most methods**, but the pattern is not universal (see @sec-q2 for per-ladder details). %s retains the lowest absolute MISE under high-rank amplitude; its advantage is mainly its lower baseline.\n\n",
-  mlabs[best_overall]
+  "2. **Amplitude variation degrades warp recovery for most methods**, but the pattern is not universal (see @sec-q2 for per-ladder details). %s retains the lowest absolute MISE under high-rank amplitude.\n\n",
+  mlabs[best_highrank_sum]
 ))
 
 # 3. Affine DGPs
@@ -1581,11 +1618,17 @@ highest_noise <- max(as.numeric(as.character(noise_sum$noise_sd)))
 noise_worst_hn <- noise_sum[noise_sd == as.character(highest_noise)][which.max(ratio)]
 noise_best_hn <- noise_sum[noise_sd == as.character(highest_noise)][which.min(ratio)]
 sev_worst <- sev_sum[1]
+noise_robust_txt <- if (noise_best_hn$ratio < 1) {
+  sprintf("%s appears most robust (%.1f$\\times$, but ratios $<$ 1 likely reflect regularization artifacts, not genuine improvement from noise)",
+    mlabs[noise_best_hn$method], noise_best_hn$ratio)
+} else {
+  sprintf("%s is most robust (%.1f$\\times$)", mlabs[noise_best_hn$method], noise_best_hn$ratio)
+}
 cat(sprintf(
-  "5. **Noise sensitivity varies sharply**: at noise=%.1f, %s is most noise-sensitive (%.1f$\\times$ degradation ratio) and %s is most robust (%.1f$\\times$). Severity hits %s hardest (%.1f$\\times$). See @sec-sensitivity.\n\n",
+  "5. **Noise sensitivity varies sharply**: at noise=%.1f, %s is most noise-sensitive (%.1f$\\times$ degradation ratio) and %s. At noise=0, severity hits %s hardest (%.1f$\\times$ degradation from sev=0.5 to 1.0). See @sec-sensitivity.\n\n",
   highest_noise,
   mlabs[noise_worst_hn$method], noise_worst_hn$ratio,
-  mlabs[noise_best_hn$method], noise_best_hn$ratio,
+  noise_robust_txt,
   mlabs[sev_worst$method], sev_worst$ratio
 ))
 

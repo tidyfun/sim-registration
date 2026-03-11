@@ -1,0 +1,1013 @@
+---
+title: "Registration Benchmark v2 — Study E: Outlier Contamination"
+subtitle: "Internal Report — tf Package"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+    self-contained: true
+execute:
+  cache: true
+  warning: false
+  message: false
+---
+
+# Setup {.unnumbered}
+
+```{r}
+#| label: setup
+#| cache: false
+library(ggplot2)
+library(data.table)
+library(patchwork)
+
+base_dir <- here::here()
+source(file.path(base_dir, "sim-analyze.R"))
+
+mcols <- method_colors()
+mlabs <- method_labels()
+dlabs <- dgp_short_labels()
+```
+
+```{r}
+#| label: load-data
+dt <- load_study_e()
+
+# Load Study A baseline (matching DGPs, noise=0.1/0.3, severity=0.5)
+dt_a <- load_study_a()
+baseline_dgps <- levels(dt$dgp)
+dt_baseline <- dt_a[
+  dgp %in% baseline_dgps &
+  noise_sd %in% c("0.1", "0.3") &
+  severity == "0.5"
+]
+dt_baseline[, contam_frac := NULL]
+dt_baseline[, contam_frac := factor("0")]
+dt_baseline[, outlier_type := NULL]
+dt_baseline[, outlier_type := factor(NA, levels = c("shape", "phase"))]
+```
+
+Study E tests method robustness when a fraction of curves are outliers.
+Design: 3 DGPs $\times$ 2 outlier types (shape, phase) $\times$ 3 fractions
+(10%, 20%, 30%) $\times$ 5 methods $\times$ 2 noise (0.1, 0.3) $\times$
+severity = 0.5 $\times$ 50 reps = 9,000 runs.
+
+Study A results at matching conditions (contam_frac = 0) serve as baseline.
+
+```{r}
+#| label: overview
+#| results: asis
+cat(sprintf("- Rows: %d | Failures: %d (%.1f%%)\n",
+  nrow(dt), sum(dt$failure), 100 * mean(dt$failure)))
+cat(sprintf("- DGPs: %s\n", paste(levels(dt$dgp), collapse = ", ")))
+cat(sprintf("- Methods: %s\n", paste(levels(dt$method), collapse = ", ")))
+cat(sprintf("- Fractions: %s\n",
+  paste(levels(dt$contam_frac), collapse = ", ")))
+cat(sprintf("- Outlier types: %s\n",
+  paste(levels(dt$outlier_type), collapse = ", ")))
+cat(sprintf("- Noise: %s\n", paste(levels(dt$noise_sd), collapse = ", ")))
+cat(sprintf("- Baseline rows from Study A: %d\n", nrow(dt_baseline)))
+```
+
+# DGP Gallery {#sec-gallery}
+
+Example realizations with 20% contamination (noise = 0.1, severity = 0.5).
+Outlier curves shown in red. Each row shows the template, warping functions
+$h_i(t)$ (dashed = identity), and the resulting observed curves $x_i(t)$.
+
+For **phase outliers**, the warps panel shows the actual extreme warps
+(severity = 3.0, red) used to generate the contaminated curves, alongside
+the original inlier warps (black).
+
+**Design note (v2):** Shape outlier curves are standardized to match the
+pointwise mean and standard deviation of inlier curves, so they are shape
+outliers only (not magnitude outliers). Both shape and phase outlier curves
+have the same noise level as inliers.
+
+::: {.panel-tabset}
+
+## Shape outliers
+
+```{r}
+#| label: gallery-shape
+#| fig-height: 9
+#| fig-cap: "Shape outliers: random sinusoids standardized to match inlier pointwise distribution."
+make_contam_example("D02", "shape") /
+  make_contam_example("D09", "shape") /
+  make_contam_example("D12", "shape")
+```
+
+## Phase outliers
+
+```{r}
+#| label: gallery-phase
+#| fig-height: 9
+#| fig-cap: "Phase outliers: extreme warps (severity=3.0) applied to contaminated curves."
+make_contam_example("D02", "phase") /
+  make_contam_example("D09", "phase") /
+  make_contam_example("D12", "phase")
+```
+
+:::
+
+# Failure Rates
+
+Contamination may cause methods to fail more often, biasing
+conditional-on-success comparisons. This section checks whether failure
+rates increase with contamination fraction.
+
+```{r}
+#| label: failure-by-contam
+#| results: asis
+fail_by_contam <- dt[,
+  .(n_total = .N,
+    n_fail = sum(failure),
+    rate_pct = sprintf("%.1f", 100 * mean(failure))),
+  by = .(method, outlier_type, contam_frac)
+]
+fail_wide <- dcast(fail_by_contam,
+  method + outlier_type ~ contam_frac,
+  value.var = "rate_pct")
+knitr::kable(fail_wide,
+  caption = "Failure rate (%) by method, outlier type, and contamination fraction.")
+```
+
+```{r}
+#| label: failure-by-contam-findings
+#| results: asis
+fail_rates <- dt[, .(rate = mean(failure)), by = .(method, contam_frac)]
+worst <- fail_rates[which.max(rate)]
+if (worst$rate > 0.05) {
+  cat(sprintf(
+    "**Warning**: %s has %.1f%% failure rate at %s contamination. ",
+    worst$method, 100 * worst$rate, worst$contam_frac))
+  cat("Conditional-on-success comparisons may be biased for this method.\n\n")
+} else {
+  cat(sprintf(
+    "All failure rates are below 5%%. Maximum: %s at %.1f%% (contam = %s).\n\n",
+    worst$method, 100 * worst$rate, worst$contam_frac))
+}
+# Baseline failure rate
+base_fail <- dt_baseline[dgp %in% baseline_dgps & severity == "0.5",
+  .(rate = mean(failure)), by = method]
+contam_fail <- dt[, .(rate = mean(failure)), by = method]
+merged_fail <- merge(base_fail, contam_fail, by = "method",
+  suffixes = c("_base", "_contam"))
+merged_fail[, increase := rate_contam - rate_base]
+if (any(merged_fail$increase > 0.02)) {
+  cat("Methods with elevated failure rates vs baseline (>2pp increase):\n\n")
+  elevated <- merged_fail[increase > 0.02]
+  for (i in seq_len(nrow(elevated))) {
+    cat(sprintf("- %s: %.1f%% → %.1f%% (+%.1fpp)\n",
+      elevated$method[i],
+      100 * elevated$rate_base[i],
+      100 * elevated$rate_contam[i],
+      100 * elevated$increase[i]))
+  }
+} else {
+  cat("No method shows a failure rate increase > 2 percentage points vs baseline.\n\n")
+}
+```
+
+# Warp MISE Degradation
+
+How does warp recovery degrade as contamination fraction increases?
+Baseline (0%) from Study A at matching conditions (noise = 0.1/0.3,
+severity = 0.5, no contamination).
+
+## Degradation curves by DGP
+
+```{r}
+#| label: warp-mise-degradation
+#| fig-height: 10
+#| fig-cap: "Warp MISE vs contamination fraction. Points show medians and vertical bars show IQRs, with separate panels by DGP and noise level."
+# Combine contaminated + baseline for degradation curves
+dt_ok <- dt[failure == FALSE]
+dt_base_ok <- dt_baseline[failure == FALSE]
+
+# Aggregate: median warp MISE by (method, dgp, noise, outlier_type, fraction)
+contam_agg <- aggregate_median_iqr(
+  dt = dt_ok,
+  metric = "warp_mise",
+  by = c("method", "dgp", "noise_sd", "outlier_type", "contam_frac"),
+  value_name = "warp_mise"
+)
+
+base_agg <- aggregate_median_iqr(
+  dt = dt_base_ok,
+  metric = "warp_mise",
+  by = c("method", "dgp", "noise_sd"),
+  value_name = "warp_mise"
+)
+
+# Plot: one panel per DGP x noise, x = fraction, y = MISE, color = method
+# Separate by outlier type (facet rows)
+plots <- list()
+for (otype in c("shape", "phase")) {
+  sub <- contam_agg[outlier_type == otype]
+
+  # Add baseline as fraction = 0
+  base_for_plot <- copy(base_agg)
+  base_for_plot[, outlier_type := otype]
+  base_for_plot[, contam_frac := "0"]
+  combined <- rbind(sub, base_for_plot, fill = TRUE)
+  combined[, frac_num := as.numeric(as.character(contam_frac))]
+
+  p <- ggplot(combined,
+    aes(x = frac_num, y = warp_mise, color = method, group = method)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.015, alpha = 0.3) +
+    facet_grid(dgp ~ noise_sd,
+      scales = "free_y",
+      labeller = labeller(
+        noise_sd = function(x) paste0("noise = ", x),
+        dgp = dlabs)) +
+    scale_color_manual(values = mcols, labels = mlabs) +
+    scale_x_continuous(
+      breaks = c(0, 0.1, 0.2, 0.3),
+      labels = c("0%", "10%", "20%", "30%")) +
+    scale_y_log10() +
+    labs(
+      title = paste0("Warp MISE vs contamination fraction — ",
+        otype, " outliers"),
+      x = "Contamination fraction",
+      y = "Median warp MISE (log scale)",
+      color = "Method") +
+    theme_benchmark()
+
+  plots[[otype]] <- p
+}
+
+plots[["shape"]] / plots[["phase"]] +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+## Degradation ratios
+
+```{r}
+#| label: degradation-ratios
+#| results: asis
+# Compute degradation ratio: MISE(contaminated) / MISE(clean)
+contam_ratios <- merge(contam_agg, base_agg,
+  by = c("method", "dgp", "noise_sd"),
+  suffixes = c("_contam", "_base"))
+contam_ratios[, ratio := warp_mise_contam / warp_mise_base]
+
+# Summary by method, outlier_type, fraction
+ratio_summary <- contam_ratios[,
+  .(
+    median_ratio = round(median(ratio, na.rm = TRUE), 2),
+    q25 = round(quantile(ratio, 0.25, na.rm = TRUE), 2),
+    q75 = round(quantile(ratio, 0.75, na.rm = TRUE), 2)
+  ),
+  by = .(method, outlier_type, contam_frac)
+]
+
+cat("Degradation ratio (contaminated / baseline warp MISE) ",
+    "— median [Q25, Q75] across DGPs and noise levels:\n\n")
+
+for (otype in c("shape", "phase")) {
+  cat(sprintf("\n### %s outliers\n\n", tools::toTitleCase(otype)))
+  sub <- ratio_summary[outlier_type == otype]
+  sub[, display := sprintf("%.2f [%.2f, %.2f]", median_ratio, q25, q75)]
+  wide <- dcast(sub, method ~ contam_frac, value.var = "display")
+  print(knitr::kable(wide))
+  cat("\n")
+}
+```
+
+```{r}
+#| label: degradation-findings
+#| results: asis
+# Which outlier type is more damaging?
+type_comparison <- contam_ratios[,
+  .(median_ratio = median(ratio, na.rm = TRUE)),
+  by = .(method, outlier_type, contam_frac)
+]
+type_wide <- dcast(type_comparison,
+  method + contam_frac ~ outlier_type,
+  value.var = "median_ratio")
+type_wide[, worse_type := ifelse(shape > phase, "shape", "phase")]
+
+worse_counts <- type_wide[, .N, by = worse_type]
+dominant <- worse_counts[which.max(N)]$worse_type
+pct_dominant <- round(100 * max(worse_counts$N) / sum(worse_counts$N))
+
+cat(sprintf(
+  "**%s outliers** are more damaging in %d%% (%d/%d) of method × fraction cells.\n\n",
+  tools::toTitleCase(dominant), pct_dominant,
+  max(worse_counts$N), sum(worse_counts$N)))
+
+# Per-method breakdown
+cat("Per-method dominant outlier type (across fractions):\n\n")
+method_dominant <- type_wide[,
+  .(n_shape = sum(worse_type == "shape"),
+    n_phase = sum(worse_type == "phase")),
+  by = method]
+method_dominant[, dominant := ifelse(n_shape > n_phase, "shape", "phase")]
+for (i in seq_len(nrow(method_dominant))) {
+  cat(sprintf("- **%s**: %s outliers more damaging (%d/%d fractions)\n",
+    mlabs[as.character(method_dominant$method[i])],
+    method_dominant$dominant[i],
+    pmax(method_dominant$n_shape[i], method_dominant$n_phase[i]),
+    method_dominant$n_shape[i] + method_dominant$n_phase[i]))
+}
+```
+
+# Shape vs Phase Outlier Comparison
+
+Direct comparison of outlier types at each contamination fraction.
+Ratio > 1 means shape outliers are more damaging than phase outliers.
+
+```{r}
+#| label: shape-vs-phase
+#| fig-height: 8
+# Ratio of shape MISE to phase MISE (>1 means shape is worse)
+shape_phase <- dcast(contam_agg,
+  method + dgp + noise_sd + contam_frac ~ outlier_type,
+  value.var = "warp_mise")
+shape_phase[, ratio := shape / phase]
+
+ggplot(shape_phase,
+  aes(x = method, y = ratio, color = method)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.6) +
+  stat_summary(fun = median, geom = "crossbar",
+    width = 0.4, color = "black", linewidth = 0.4) +
+  facet_wrap(~ contam_frac,
+    labeller = labeller(contam_frac = function(x) paste0(x, " contam."))) +
+  scale_color_manual(values = mcols, labels = mlabs, guide = "none") +
+  scale_x_discrete(labels = mlabs) +
+  scale_y_log10() +
+  labs(
+    title = "Shape / phase outlier warp MISE ratio",
+    subtitle = "> 1 means shape outliers are more damaging",
+    x = NULL,
+    y = "MISE ratio (shape / phase, log scale)") +
+  theme_benchmark() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+```{r}
+#| label: shape-phase-findings
+#| results: asis
+# Per-method median shape/phase ratio at 30%
+sp_at_30 <- shape_phase[contam_frac == "0.3",
+  .(
+    mean_ratio = mean(ratio, na.rm = TRUE),
+    se_ratio = if (.N > 1) sd(ratio, na.rm = TRUE) / sqrt(.N) else 0,
+    median_ratio = round(median(ratio, na.rm = TRUE), 2)
+  ),
+  by = method]
+
+cat("At 30% contamination, the median shape/phase warp MISE ratio by method:\n\n")
+for (i in seq_len(nrow(sp_at_30))) {
+  m <- as.character(sp_at_30$method[i])
+  r <- sp_at_30$median_ratio[i]
+  direction <- if (r > 1) "shape worse" else "phase worse"
+  cat(sprintf("- **%s**: median %.2f×; mean %s (%s)\n",
+    mlabs[m], r, fmt_mean_se(sp_at_30$mean_ratio[i], sp_at_30$se_ratio[i]), direction))
+}
+
+cat("\nThe pattern is consistent across contamination fractions: **iterative ",
+    "template-based methods** (SRVF, FDA) are more damaged by phase outliers, ",
+    "which pull the iterative template estimate toward extreme warps. ",
+    "**Landmark** is roughly equally affected by both types. ",
+    "**Affine** is approximately equally sensitive to both, likely because ",
+    "its shift+scale model cannot accommodate either type of outlier.\n")
+```
+
+# Noise × Contamination Interaction
+
+Does high noise compound with contamination? If yes, robustness at
+noise = 0.1 overestimates practical robustness.
+
+```{r}
+#| label: noise-contam-interaction
+#| fig-height: 8
+#| fig-cap: "Noise × contamination interaction. Points show median degradation ratios and vertical bars show IQRs across DGPs."
+# Compare degradation ratios at noise=0.1 vs noise=0.3
+noise_interact <- contam_ratios[,
+  .(
+    median_ratio = median(ratio, na.rm = TRUE),
+    q25 = quantile(ratio, 0.25, na.rm = TRUE),
+    q75 = quantile(ratio, 0.75, na.rm = TRUE)
+  ),
+  by = .(method, noise_sd, outlier_type, contam_frac)
+]
+
+ggplot(noise_interact,
+  aes(x = as.numeric(as.character(contam_frac)),
+      y = median_ratio,
+      color = noise_sd,
+      group = noise_sd)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.015, alpha = 0.3) +
+  facet_grid(outlier_type ~ method,
+    labeller = labeller(method = mlabs)) +
+  scale_color_manual(
+    values = c("0.1" = "#2166AC", "0.3" = "#B2182B"),
+    labels = c("0.1" = "noise = 0.1", "0.3" = "noise = 0.3")) +
+  scale_x_continuous(
+    breaks = c(0.1, 0.2, 0.3),
+    labels = c("10%", "20%", "30%")) +
+  labs(
+    title = "Noise × contamination interaction",
+    subtitle = "Degradation ratio (contaminated / baseline) by noise level",
+    x = "Contamination fraction",
+    y = "Degradation ratio",
+    color = NULL) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: noise-contam-findings
+#| results: asis
+# Compare degradation at noise=0.1 vs 0.3
+noise_comparison <- dcast(noise_interact,
+  method + outlier_type + contam_frac ~ noise_sd,
+  value.var = "median_ratio")
+setnames(noise_comparison, c("0.1", "0.3"), c("low_noise", "high_noise"))
+noise_comparison[, amplification := high_noise / low_noise]
+
+# Summarize: does high noise amplify contamination effects?
+amp_summary <- noise_comparison[,
+  .(median_amp = round(median(amplification, na.rm = TRUE), 2)),
+  by = method]
+
+cat("Noise amplification of contamination effects ",
+    "(ratio of degradation at noise=0.3 vs 0.1):\n\n")
+for (i in seq_len(nrow(amp_summary))) {
+  m <- as.character(amp_summary$method[i])
+  amp <- amp_summary$median_amp[i]
+  if (amp > 1.2) {
+    txt <- sprintf("amplification (%.2f×)", amp)
+  } else if (amp < 0.8) {
+    txt <- sprintf("attenuation (%.2f×)", amp)
+  } else {
+    txt <- sprintf("roughly constant (%.2f×)", amp)
+  }
+  cat(sprintf("- **%s**: %s\n", mlabs[m], txt))
+}
+
+cat("\n**Interpretation**: The degradation ratio measures *relative* worsening ",
+    "vs each method's own baseline at that noise level. ",
+    "SRVF shows apparent attenuation at high noise because its baseline MISE ",
+    "is already elevated at noise=0.3 (SRVF operates on derivatives, amplifying noise). ",
+    "The *absolute* MISE at noise=0.3 with contamination is still worse — ",
+    "the ratio just appears smaller because the denominator is larger.\n")
+```
+
+# Template Bias Under Contamination
+
+Outliers can bias template estimation, degrading all downstream
+warp estimates. This section examines template quality via L$^2$ MISE
+and Fisher-Rao elastic distance.
+
+**Context**: Template MISE rankings are strongly DGP-dependent (see Study A).
+SRVF has high template MISE on harmonic DGPs (D02, D09) but low on
+wiggly DGPs (D12). The per-DGP panels below show this clearly — method
+rankings at baseline (0%) differ across DGPs, and contamination effects
+compound on top of these baseline differences.
+
+## Template MISE
+
+```{r}
+#| label: template-mise-contam
+#| fig-height: 8
+#| fig-cap: "Template MISE vs contamination fraction. Points show medians and vertical bars show IQRs."
+# Template MISE with baseline
+tmise_contam <- aggregate_median_iqr(
+  dt = dt_ok,
+  metric = "template_mise",
+  by = c("method", "dgp", "noise_sd", "outlier_type", "contam_frac"),
+  value_name = "template_mise"
+)
+tmise_base <- aggregate_median_iqr(
+  dt = dt_base_ok,
+  metric = "template_mise",
+  by = c("method", "dgp", "noise_sd"),
+  value_name = "template_mise"
+)
+
+plots_tmise <- list()
+for (otype in c("shape", "phase")) {
+  sub <- tmise_contam[outlier_type == otype]
+  base_for_plot <- copy(tmise_base)
+  base_for_plot[, outlier_type := otype]
+  base_for_plot[, contam_frac := "0"]
+  combined <- rbind(sub, base_for_plot, fill = TRUE)
+  combined[, frac_num := as.numeric(as.character(contam_frac))]
+
+  p <- ggplot(combined,
+    aes(x = frac_num, y = template_mise, color = method, group = method)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.015, alpha = 0.3) +
+    facet_grid(dgp ~ noise_sd,
+      scales = "free_y",
+      labeller = labeller(
+        noise_sd = function(x) paste0("noise = ", x),
+        dgp = dlabs)) +
+    scale_color_manual(values = mcols, labels = mlabs) +
+    scale_x_continuous(
+      breaks = c(0, 0.1, 0.2, 0.3),
+      labels = c("0%", "10%", "20%", "30%")) +
+    scale_y_log10() +
+    labs(
+      title = paste0("Template MISE — ", otype, " outliers"),
+      x = "Contamination fraction",
+      y = "Median template MISE (log scale)",
+      color = "Method") +
+    theme_benchmark()
+
+  plots_tmise[[otype]] <- p
+}
+
+plots_tmise[["shape"]] / plots_tmise[["phase"]] +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+## Template elastic distance
+
+```{r}
+#| label: template-edist-contam
+#| fig-height: 8
+#| fig-cap: "Template elastic distance vs contamination fraction. Points show medians and vertical bars show IQRs."
+edist_contam <- aggregate_median_iqr(
+  dt = dt_ok[!is.na(template_elastic_dist)],
+  metric = "template_elastic_dist",
+  by = c("method", "dgp", "noise_sd", "outlier_type", "contam_frac"),
+  value_name = "edist"
+)
+edist_base <- aggregate_median_iqr(
+  dt = dt_base_ok[!is.na(template_elastic_dist)],
+  metric = "template_elastic_dist",
+  by = c("method", "dgp", "noise_sd"),
+  value_name = "edist"
+)
+
+plots_edist <- list()
+for (otype in c("shape", "phase")) {
+  sub <- edist_contam[outlier_type == otype]
+  base_for_plot <- copy(edist_base)
+  base_for_plot[, outlier_type := otype]
+  base_for_plot[, contam_frac := "0"]
+  combined <- rbind(sub, base_for_plot, fill = TRUE)
+  combined[, frac_num := as.numeric(as.character(contam_frac))]
+
+  p <- ggplot(combined,
+    aes(x = frac_num, y = edist, color = method, group = method)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.015, alpha = 0.3) +
+    facet_grid(dgp ~ noise_sd,
+      scales = "free_y",
+      labeller = labeller(
+        noise_sd = function(x) paste0("noise = ", x),
+        dgp = dlabs)) +
+    scale_color_manual(values = mcols, labels = mlabs) +
+    scale_x_continuous(
+      breaks = c(0, 0.1, 0.2, 0.3),
+      labels = c("0%", "10%", "20%", "30%")) +
+    labs(
+      title = paste0("Template elastic distance — ", otype, " outliers"),
+      x = "Contamination fraction",
+      y = "Median elastic distance",
+      color = "Method") +
+    theme_benchmark()
+
+  plots_edist[[otype]] <- p
+}
+
+plots_edist[["shape"]] / plots_edist[["phase"]] +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+## Case study: SRVF template improvement under contamination
+
+The elastic distance results show SRVF's template quality can paradoxically
+*improve* under contamination. This section visualizes a specific instance:
+all five methods are run on the same dataset with and without contamination.
+Black solid line = true template; colored dashed line = estimated template;
+grey lines = aligned curves.
+
+```{r}
+#| label: case-study-setup
+#| fig-height: 7
+#| fig-width: 12
+# D12 (wiggly/GP/high-rank) + phase outliers, seed=7: SRVF elastic distance
+# *decreases* from 0.703 to 0.557 (ratio 0.79) while template MISE doubles.
+cs <- make_contam_case_study(
+  dgp_name = "D12",
+  outlier_type = "phase",
+  contam_frac = 0.20,
+  noise_sd = 0.1,
+  severity = 0.5,
+  n = 50,
+  seed = 7
+)
+cs$plot
+```
+
+```{r}
+#| label: case-study-table
+mdf <- cs$metrics
+mdf$tmise_ratio <- mdf$tmise_contam / mdf$tmise_clean
+mdf$edist_ratio <- mdf$edist_contam / mdf$edist_clean
+
+display <- data.frame(
+  Method = mdf$method,
+  `MISE clean` = fmt(mdf$tmise_clean),
+  `MISE contam` = fmt(mdf$tmise_contam),
+  `MISE ratio` = sprintf("%.2f\u00d7", mdf$tmise_ratio),
+  `Elastic clean` = fmt(mdf$edist_clean),
+  `Elastic contam` = fmt(mdf$edist_contam),
+  `Elastic ratio` = sprintf("%.2f\u00d7", mdf$edist_ratio),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+knitr::kable(display, align = "lcccccc",
+  caption = "Template quality for clean vs contaminated data (D12 wiggly/GP/high-rank, 20% phase, noise=0.1).")
+```
+
+```{r}
+#| label: case-study-findings
+#| results: asis
+srvf_row <- mdf[mdf$method == "SRVF", ]
+if (srvf_row$edist_ratio < 1) {
+  cat(sprintf(
+    "**SRVF's elastic distance decreases from %s to %s (ratio %.2f\u00d7)**. ",
+    fmt(srvf_row$edist_clean), fmt(srvf_row$edist_contam),
+    srvf_row$edist_ratio))
+  cat("This single realization is consistent with the aggregate phase-outlier ",
+      "pattern, but should be read as an illustration rather than proof of mechanism. ",
+      "A plausible interpretation is that SRVF absorbs more of the extreme warping ",
+      "into phase than into the template in this draw.\n")
+} else {
+  cat(sprintf(
+    "In this particular realization, SRVF elastic distance ratio is %.2f\u00d7. ",
+    srvf_row$edist_ratio))
+  cat("The paradoxical improvement is a stochastic phenomenon that appears ",
+      "in aggregate across many replications.\n")
+}
+```
+
+```{r}
+#| label: template-bias-findings
+#| results: asis
+# Template MISE degradation ratios
+tmise_ratios <- merge(tmise_contam, tmise_base,
+  by = c("method", "dgp", "noise_sd"),
+  suffixes = c("_contam", "_base"))
+tmise_ratios[, ratio := template_mise_contam / template_mise_base]
+
+tmise_ratio_summary <- tmise_ratios[,
+  .(median_ratio = round(median(ratio, na.rm = TRUE), 2)),
+  by = .(method, outlier_type, contam_frac)
+]
+
+# Elastic distance degradation ratios
+edist_ratios <- merge(edist_contam, edist_base,
+  by = c("method", "dgp", "noise_sd"),
+  suffixes = c("_contam", "_base"))
+edist_ratios[, ratio := edist_contam / edist_base]
+
+edist_ratio_summary <- edist_ratios[,
+  .(median_ratio = round(median(ratio, na.rm = TRUE), 2)),
+  by = .(method, outlier_type, contam_frac)
+]
+
+cat("### Degradation ratios at 30% contamination\n\n")
+cat("Template MISE and elastic distance degradation ",
+    "(contaminated / baseline):\n\n")
+
+for (otype in c("shape", "phase")) {
+  cat(sprintf("\n**%s outliers:**\n\n", tools::toTitleCase(otype)))
+  tmise_sub <- tmise_ratio_summary[
+    contam_frac == "0.3" & outlier_type == otype]
+  edist_sub <- edist_ratio_summary[
+    contam_frac == "0.3" & outlier_type == otype]
+  merged <- merge(tmise_sub[, .(method, tmise = median_ratio)],
+    edist_sub[, .(method, edist = median_ratio)], by = "method")
+  merged <- merged[order(-tmise)]
+  cat("| Method | Template MISE | Elastic distance |\n")
+  cat("|--------|:---:|:---:|\n")
+  for (i in seq_len(nrow(merged))) {
+    m <- as.character(merged$method[i])
+    cat(sprintf("| %s | %.2f× | %.2f× |\n",
+      mlabs[m], merged$tmise[i], merged$edist[i]))
+  }
+  cat("\n")
+}
+
+cat("**Key observation**: Template MISE and elastic distance tell very different ",
+    "stories. Landmark has the worst template MISE degradation (up to ~28× for ",
+    "shape outliers) but only moderate elastic distance degradation (~2×). This ",
+    "means outliers shift the template *position* (L² error) without greatly ",
+    "distorting its *shape* (elastic distance). Conversely, SRVF's elastic ",
+    "distance sometimes *decreases* under phase contamination (ratio < 1) in the ",
+    "aggregate summaries, suggesting a phase/template tradeoff rather than simple ",
+    "uniform degradation.\n")
+```
+
+# Alignment Error Degradation
+
+Alignment error measures how well curves are aligned to their true (pre-warp)
+positions — the end goal of registration. This is a more direct measure of
+practical quality than warp MISE.
+
+```{r}
+#| label: alignment-error-degradation
+#| fig-height: 10
+#| fig-cap: "Alignment error vs contamination fraction. Points show medians and vertical bars show IQRs, with separate panels by DGP and noise level."
+# Alignment error aggregation
+aerr_contam <- aggregate_median_iqr(
+  dt = dt_ok,
+  metric = "alignment_error",
+  by = c("method", "dgp", "noise_sd", "outlier_type", "contam_frac"),
+  value_name = "alignment_error"
+)
+aerr_base <- aggregate_median_iqr(
+  dt = dt_base_ok,
+  metric = "alignment_error",
+  by = c("method", "dgp", "noise_sd"),
+  value_name = "alignment_error"
+)
+
+plots_aerr <- list()
+for (otype in c("shape", "phase")) {
+  sub <- aerr_contam[outlier_type == otype]
+  base_for_plot <- copy(aerr_base)
+  base_for_plot[, outlier_type := otype]
+  base_for_plot[, contam_frac := "0"]
+  combined <- rbind(sub, base_for_plot, fill = TRUE)
+  combined[, frac_num := as.numeric(as.character(contam_frac))]
+
+  p <- ggplot(combined,
+    aes(x = frac_num, y = alignment_error, color = method, group = method)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.015, alpha = 0.3) +
+    facet_grid(dgp ~ noise_sd,
+      scales = "free_y",
+      labeller = labeller(
+        noise_sd = function(x) paste0("noise = ", x),
+        dgp = dlabs)) +
+    scale_color_manual(values = mcols, labels = mlabs) +
+    scale_x_continuous(
+      breaks = c(0, 0.1, 0.2, 0.3),
+      labels = c("0%", "10%", "20%", "30%")) +
+    scale_y_log10() +
+    labs(
+      title = paste0("Alignment error — ", otype, " outliers"),
+      x = "Contamination fraction",
+      y = "Median alignment error (log scale)",
+      color = "Method") +
+    theme_benchmark()
+
+  plots_aerr[[otype]] <- p
+}
+
+plots_aerr[["shape"]] / plots_aerr[["phase"]] +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: alignment-error-ratios
+#| results: asis
+# Compute alignment error degradation ratios
+aerr_ratios <- merge(aerr_contam, aerr_base,
+  by = c("method", "dgp", "noise_sd"),
+  suffixes = c("_contam", "_base"))
+aerr_ratios[, ratio := alignment_error_contam / alignment_error_base]
+
+aerr_ratio_summary <- aerr_ratios[,
+  .(
+    median_ratio = round(median(ratio, na.rm = TRUE), 2),
+    q25 = round(quantile(ratio, 0.25, na.rm = TRUE), 2),
+    q75 = round(quantile(ratio, 0.75, na.rm = TRUE), 2)
+  ),
+  by = .(method, outlier_type, contam_frac)
+]
+
+cat("Alignment error degradation ratio (contaminated / baseline) ",
+    "— median [Q25, Q75]:\n\n")
+for (otype in c("shape", "phase")) {
+  cat(sprintf("\n### %s outliers\n\n", tools::toTitleCase(otype)))
+  sub <- aerr_ratio_summary[outlier_type == otype]
+  sub[, display := sprintf("%.2f [%.2f, %.2f]", median_ratio, q25, q75)]
+  wide <- dcast(sub, method ~ contam_frac, value.var = "display")
+  print(knitr::kable(wide))
+  cat("\n")
+}
+```
+
+```{r}
+#| label: alignment-error-findings
+#| results: asis
+# Compare alignment error vs warp MISE rankings
+aerr_at_30 <- aerr_ratios[contam_frac == "0.3",
+  .(aerr_ratio = median(ratio)), by = method][order(aerr_ratio)]
+wmise_at_30 <- contam_ratios[contam_frac == "0.3",
+  .(wmise_ratio = median(ratio)), by = method][order(wmise_ratio)]
+
+merged_rank <- merge(aerr_at_30, wmise_at_30, by = "method")
+merged_rank[, aerr_rank := rank(aerr_ratio)]
+merged_rank[, wmise_rank := rank(wmise_ratio)]
+
+cat("**Alignment error vs warp MISE robustness ranking at 30%:**\n\n")
+cat("| Method | Alignment error | Warp MISE |\n")
+cat("|--------|:---:|:---:|\n")
+for (i in seq_len(nrow(merged_rank))) {
+  m <- as.character(merged_rank$method[i])
+  cat(sprintf("| %s | %.1f× (rank %d) | %.1f× (rank %d) |\n",
+    mlabs[m],
+    merged_rank$aerr_ratio[i], merged_rank$aerr_rank[i],
+    merged_rank$wmise_ratio[i], merged_rank$wmise_rank[i]))
+}
+
+rank_concordance <- cor(merged_rank$aerr_rank, merged_rank$wmise_rank,
+  method = "spearman")
+cat(sprintf(
+  "\nRank concordance (Spearman): %.2f. ", rank_concordance))
+if (rank_concordance > 0.8) {
+  cat("Alignment error and warp MISE robustness rankings are highly consistent.\n")
+} else {
+  cat("Rankings differ — method robustness depends on which metric is prioritized.\n")
+}
+```
+
+# Method Robustness Ranking
+
+Degradation heatmaps at 30% contamination across all primary metrics.
+
+```{r}
+#| label: robustness-heatmap-helper
+#| fig-height: 6
+# Helper function for degradation heatmaps
+make_degrad_heatmap <- function(ratios_dt, metric_name) {
+  worst_case <- ratios_dt[
+    contam_frac == "0.3",
+    .(median_ratio = median(ratio, na.rm = TRUE)),
+    by = .(method, dgp, outlier_type)
+  ]
+
+  ggplot(worst_case,
+    aes(x = method, y = interaction(outlier_type, dgp, sep = " | "),
+        fill = median_ratio)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%.1f×", median_ratio)),
+      size = 2.5, color = "white") +
+    scale_x_discrete(labels = mlabs) +
+    scale_fill_gradient2(
+      low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+      midpoint = 1, limits = c(0.5, NA),
+      name = "Degradation\nratio") +
+    labs(
+      title = metric_name,
+      x = NULL, y = NULL) +
+    theme_benchmark() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+```
+
+## Warp MISE
+
+```{r}
+#| label: robustness-heatmap-warp
+#| fig-height: 6
+make_degrad_heatmap(contam_ratios, "Warp MISE degradation (30% contamination)")
+```
+
+## Alignment error
+
+```{r}
+#| label: robustness-heatmap-alignment
+#| fig-height: 6
+make_degrad_heatmap(aerr_ratios, "Alignment error degradation (30% contamination)")
+```
+
+## Template MISE
+
+```{r}
+#| label: robustness-heatmap-template
+#| fig-height: 6
+make_degrad_heatmap(tmise_ratios, "Template MISE degradation (30% contamination)")
+```
+
+## Template elastic distance
+
+```{r}
+#| label: robustness-heatmap-edist
+#| fig-height: 6
+make_degrad_heatmap(edist_ratios, "Template elastic distance degradation (30% contamination)")
+```
+
+# Summary
+
+```{r}
+#| label: summary
+#| results: asis
+# Warp-MISE robustness ranking across all conditions
+overall <- contam_ratios[,
+  .(
+    median_degrad_10 = round(median(ratio[contam_frac == "0.1"], na.rm = TRUE), 2),
+    median_degrad_20 = round(median(ratio[contam_frac == "0.2"], na.rm = TRUE), 2),
+    median_degrad_30 = round(median(ratio[contam_frac == "0.3"], na.rm = TRUE), 2),
+    max_degrad = round(max(ratio, na.rm = TRUE), 1)
+  ),
+  by = method
+]
+overall_30_unc <- mean_se_table(contam_ratios[contam_frac == "0.3"], "ratio", "method")
+overall <- merge(overall, overall_30_unc[, .(method, mean_degrad_30 = mean, se_degrad_30 = se)],
+  by = "method")
+overall <- overall[order(median_degrad_30)]
+
+cat("**Warp-MISE robustness ranking** (median warp MISE degradation ratio, ",
+    "lower = more robust):\n\n")
+overall[, mean_se_30 := fmt_mean_se(mean_degrad_30, se_degrad_30)]
+knitr::kable(
+  overall[, .(method, median_degrad_10, median_degrad_20, median_degrad_30, mean_se_30, max_degrad)],
+  col.names = c("Method", "10%", "20%", "30% median", "30% mean ± SE", "Worst case"),
+  caption = "Warp-MISE degradation by contamination fraction. Worst case is max across all conditions.")
+cat("\n")
+
+most_robust <- mlabs[as.character(overall$method[1])]
+least_robust <- mlabs[as.character(overall$method[nrow(overall)])]
+cat(sprintf(
+  "**%s** is the most robust method by warp MISE (%.2f× median degradation at 30%% contamination), ",
+  most_robust, overall$median_degrad_30[1]))
+cat(sprintf(
+  "while **%s** is the least robust (%.2f×).\n\n",
+  least_robust, overall$median_degrad_30[nrow(overall)]))
+
+# Key findings
+cat("### Key findings\n\n")
+
+cat("1. **By warp MISE, Landmark is dramatically more robust** than all other methods. ",
+    sprintf("At 30%% contamination, Landmark degrades %.1f× vs %.1f–%.1f× ",
+      overall[method == "landmark_auto"]$median_degrad_30,
+      overall[method != "landmark_auto", min(median_degrad_30)],
+      overall[method != "landmark_auto", max(median_degrad_30)]),
+    "for iterative methods. The corresponding 30%% mean ± SE is ",
+    overall[method == "landmark_auto", mean_se_30],
+    ". This is expected: landmarks are local features ",
+    "that are robust to global contamination.\n\n")
+
+cat("2. **Phase outliers are more damaging than shape outliers** for iterative ",
+    "template-based methods (SRVF, FDA). Phase outliers warp the template estimate ",
+    "via the iterative Procrustes loop, while shape outliers are partially averaged ",
+    "out. Affine is equally affected by both types.\n\n")
+
+contam_profile <- dcast(
+  contam_ratios,
+  method + dgp + noise_sd + outlier_type ~ contam_frac,
+  value.var = "ratio"
+)
+contam_profile[, monotone := `0.1` <= `0.2` & `0.2` <= `0.3`]
+monotone_n <- sum(contam_profile$monotone)
+monotone_total <- nrow(contam_profile)
+cat("3. **No method crashes under contamination.** 0% failure rate across all ",
+    "9,000 runs, even at 30% contamination. Degradation is almost always gradual: ",
+    monotone_n, "/", monotone_total,
+    " method × DGP × noise × outlier profiles show monotone warp-MISE worsening, ",
+    "with only a few near-flat landmark exceptions and no sharp breakdown threshold.\n\n")
+
+srvf_noise <- contam_ratios[method == "srvf" & contam_frac == "0.3",
+  .(r = median(ratio)), by = noise_sd]
+cat(sprintf(
+  "4. **SRVF shows an apparent noise-attenuation artifact.** Degradation ratio at 30%% is %.1f× at noise=0.1 but only %.1f× at noise=0.3. ",
+  srvf_noise[noise_sd == "0.1"]$r,
+  srvf_noise[noise_sd == "0.3"]$r),
+  "This is because SRVF's baseline MISE is already poor at high noise ",
+  "(derivative amplification), so the denominator is larger. The absolute ",
+  "MISE still worsens with noise.\n\n")
+
+cat("5. **Template MISE and elastic distance diverge under contamination.** ",
+    "Landmark shows the worst template MISE degradation but only moderate ",
+    "elastic distance degradation — outliers shift the template position ",
+    "without distorting its shape. SRVF's elastic distance can even improve ",
+    "under phase contamination in the aggregated ratios, pointing to a ",
+    "phase/template tradeoff rather than uniform template deterioration.\n\n")
+
+cat("6. **Practical implication**: For data that may contain outliers, ",
+    "Landmark-based registration (or a preprocessing step to remove outliers) ",
+    "is the safest choice if warp recovery is the primary target. But the ",
+    "alignment-error ranking differs substantially from the warp-MISE ranking ",
+    "(Spearman 0.10), so the preferred method remains metric-dependent. Among ",
+    "iterative methods, SRVF is more robust than FDA methods to shape outliers ",
+    "but more vulnerable to phase outliers.\n")
+```

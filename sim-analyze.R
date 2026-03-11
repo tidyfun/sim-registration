@@ -4,6 +4,13 @@
 #   load_study_a()        - Load and annotate Study A results
 #   dgp_factors()         - DGP factor lookup table
 #   dgp_desc_labels()     - Descriptive DGP labels for plots
+#   aggregate_metric()    - Aggregate one metric by cells
+#   aggregate_median_iqr() - Median + IQR summaries by cells
+#   ratio_to_baseline()   - Ratios relative to a within-table baseline
+#   find_optimal_by_metric() - Optimal setting per cell
+#   compare_optima()      - Compare optimal settings across metrics
+#   rank_summary_table()  - Rank summaries with uncertainty
+#   mean_se_table()       - Mean/SE summaries for derived quantities
 #   mc_summary()          - Aggregation with MC standard errors
 #   amplitude_ladders()   - Paired DGP comparison ladders for Q2
 #   warp_ladders()        - Paired DGP comparison ladders for Q3
@@ -308,7 +315,276 @@ load_study_d <- function(results_dir = file.path(base_dir, "results")) {
   dt
 }
 
+load_study_e <- function(results_dir = file.path(base_dir, "results")) {
+  files <- list.files(
+    results_dir,
+    pattern = "^results_D\\d+_\\w+_E\\.rds$",
+    full.names = TRUE
+  )
+  if (length(files) == 0) stop("No Study E result files found in ", results_dir)
+
+  dt <- rbindlist(lapply(files, readRDS))
+
+  factors <- dgp_factors()
+  dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
+
+  dt[, dgp := factor(dgp, levels = sort(unique(dgp)))]
+  dt[,
+    method := factor(
+      method,
+      levels = c(
+        "srvf",
+        "fda_default",
+        "fda_crit1",
+        "affine_ss",
+        "landmark_auto"
+      )
+    )
+  ]
+  dt[,
+    warp_type := factor(warp_type, levels = c("affine", "simple", "complex"))
+  ]
+  dt[, noise_sd := factor(noise_sd)]
+  dt[, contam_frac := factor(contam_frac)]
+  dt[, outlier_type := factor(outlier_type, levels = c("shape", "phase"))]
+
+  message(sprintf(
+    "Loaded %d rows | %d DGPs | %d methods | %d fractions | %d outlier types | %.1f%% failures",
+    nrow(dt),
+    uniqueN(dt$dgp),
+    uniqueN(dt$method),
+    uniqueN(dt$contam_frac),
+    uniqueN(dt$outlier_type),
+    100 * mean(dt$failure, na.rm = TRUE)
+  ))
+  dt
+}
+
 # --- Aggregation with MC SEs -------------------------------------------------
+
+aggregate_metric <- function(
+  dt,
+  metric,
+  by,
+  stat = c("median", "mean"),
+  value_name = NULL
+) {
+  stopifnot(
+    "dt must be data.table" = data.table::is.data.table(dt),
+    "metric must be length-1 character" = is.character(metric) &&
+      length(metric) == 1L,
+    "by must be non-empty character" = is.character(by) && length(by) >= 1L
+  )
+  stat <- match.arg(stat)
+  if (is.null(value_name)) {
+    value_name <- metric
+  }
+
+  dt_ok <- dt[failure == FALSE & !is.na(get(metric))]
+  agg <- switch(
+    stat,
+    median = dt_ok[, .(value = median(get(metric), na.rm = TRUE)), by = by],
+    mean = dt_ok[, .(value = mean(get(metric), na.rm = TRUE)), by = by]
+  )
+  data.table::setnames(agg, "value", value_name)
+  agg[]
+}
+
+aggregate_median_iqr <- function(dt, metric, by, value_name = NULL) {
+  stopifnot(
+    "dt must be data.table" = data.table::is.data.table(dt),
+    "metric must be length-1 character" = is.character(metric) &&
+      length(metric) == 1L,
+    "by must be non-empty character" = is.character(by) && length(by) >= 1L
+  )
+  if (is.null(value_name)) {
+    value_name <- metric
+  }
+
+  out <- dt[
+    failure == FALSE & !is.na(get(metric)),
+    .(
+      value = median(get(metric), na.rm = TRUE),
+      q25 = quantile(get(metric), 0.25, na.rm = TRUE),
+      q75 = quantile(get(metric), 0.75, na.rm = TRUE)
+    ),
+    by = by
+  ]
+  data.table::setnames(out, "value", value_name)
+  out[]
+}
+
+ratio_to_baseline <- function(
+  dt,
+  metric,
+  by,
+  baseline_col,
+  baseline_level,
+  stat = c("median", "mean"),
+  value_name = NULL,
+  baseline_name = "baseline_value",
+  ratio_name = "ratio",
+  keep_baseline = FALSE
+) {
+  stopifnot(
+    "baseline_col must be length-1 character" = is.character(baseline_col) &&
+      length(baseline_col) == 1L,
+    "baseline_col must appear in by" = baseline_col %in% by
+  )
+  if (is.null(value_name)) {
+    value_name <- metric
+  }
+
+  agg <- aggregate_metric(
+    dt = dt,
+    metric = metric,
+    by = by,
+    stat = stat,
+    value_name = value_name
+  )
+  key_cols <- setdiff(by, baseline_col)
+  baseline_dt <- agg[
+    get(baseline_col) == baseline_level,
+    c(key_cols, value_name),
+    with = FALSE
+  ]
+  data.table::setnames(baseline_dt, value_name, baseline_name)
+
+  out <- merge(agg, baseline_dt, by = key_cols)
+  out[, (ratio_name) := get(value_name) / get(baseline_name)]
+  if (!keep_baseline) {
+    out <- out[get(baseline_col) != baseline_level]
+  }
+  out[]
+}
+
+find_optimal_by_metric <- function(
+  dt,
+  metric,
+  by,
+  option_col,
+  stat = c("median", "mean"),
+  lower_is_better = TRUE,
+  value_name = NULL
+) {
+  stopifnot(
+    "option_col must be length-1 character" = is.character(option_col) &&
+      length(option_col) == 1L,
+    "option_col must not appear in by" = !option_col %in% by
+  )
+  if (is.null(value_name)) {
+    value_name <- metric
+  }
+
+  agg <- aggregate_metric(
+    dt = dt,
+    metric = metric,
+    by = c(by, option_col),
+    stat = match.arg(stat),
+    value_name = value_name
+  )
+  optimal <- if (lower_is_better) {
+    agg[, .SD[which.min(get(value_name))], by = by]
+  } else {
+    agg[, .SD[which.max(get(value_name))], by = by]
+  }
+  optimal[]
+}
+
+compare_optima <- function(
+  opt_a,
+  opt_b,
+  key_cols,
+  value_cols,
+  value_names = c("value_a", "value_b")
+) {
+  stopifnot(
+    "opt_a must be data.table" = data.table::is.data.table(opt_a),
+    "opt_b must be data.table" = data.table::is.data.table(opt_b),
+    "value_cols must have length 2" = length(value_cols) == 2L,
+    "value_names must have length 2" = length(value_names) == 2L
+  )
+
+  a_dt <- opt_a[, c(key_cols, value_cols[1]), with = FALSE]
+  b_dt <- opt_b[, c(key_cols, value_cols[2]), with = FALSE]
+  data.table::setnames(a_dt, value_cols[1], value_names[1])
+  data.table::setnames(b_dt, value_cols[2], value_names[2])
+
+  out <- merge(a_dt, b_dt, by = key_cols)
+  out[, agree := get(value_names[1]) == get(value_names[2])]
+  out[]
+}
+
+rank_summary_table <- function(
+  dt,
+  metric,
+  by,
+  rank_within,
+  stat = c("median", "mean"),
+  lower_is_better = TRUE
+) {
+  stopifnot(
+    "rank_within must be non-empty character" = is.character(rank_within) &&
+      length(rank_within) >= 1L,
+    "rank_within must be subset of by" = all(rank_within %in% by)
+  )
+
+  agg <- aggregate_metric(
+    dt = dt,
+    metric = metric,
+    by = by,
+    stat = match.arg(stat),
+    value_name = metric
+  )
+  if (lower_is_better) {
+    agg[, rank := rank(get(metric), ties.method = "min"), by = rank_within]
+  } else {
+    agg[, rank := rank(-get(metric), ties.method = "min"), by = rank_within]
+  }
+
+  summary_cols <- setdiff(by, rank_within)
+  summary_dt <- agg[,
+    .(
+      mean_rank = mean(rank),
+      se_rank = if (.N > 1) sd(rank) / sqrt(.N) else 0,
+      n_rank1 = sum(rank == 1),
+      n_top2 = sum(rank <= 2),
+      n = .N
+    ),
+    by = summary_cols
+  ]
+
+  list(cells = agg, summary = summary_dt)
+}
+
+mean_se_table <- function(dt, value_col, by) {
+  stopifnot(
+    "dt must be data.table" = data.table::is.data.table(dt),
+    "value_col must be length-1 character" = is.character(value_col) &&
+      length(value_col) == 1L,
+    "by must be character" = is.character(by)
+  )
+
+  dt[
+    !is.na(get(value_col)),
+    .(
+      mean = mean(get(value_col), na.rm = TRUE),
+      se = if (.N > 1) sd(get(value_col), na.rm = TRUE) / sqrt(.N) else 0,
+      median = median(get(value_col), na.rm = TRUE),
+      n = .N
+    ),
+    by = by
+  ]
+}
+
+fmt_mean_se <- function(mean, se, digits = 2, scale = 1, suffix = "") {
+  sprintf(
+    paste0("%.", digits, "f ± %.", digits, "f%s"),
+    mean * scale,
+    se * scale,
+    suffix
+  )
+}
 
 mc_summary <- function(dt, metric, by) {
   metric_chr <- as.character(substitute(metric))
@@ -725,4 +1001,344 @@ make_dgp_example <- function(
     theme_benchmark(base_size = 9)
 
   p_template + p_warps + p_data + patchwork::plot_layout(nrow = 1)
+}
+
+#' Generate contaminated data example for one DGP × outlier type
+#' Returns a patchwork of 3 panels: template, warps, observed data
+#' Outlier curves shown in red (alpha = 0.5)
+#' For phase outliers, the extreme warps (severity=3.0) are shown in red
+#' in the warps panel (replacing the original warps for those curves).
+make_contam_example <- function(
+  dgp_name,
+  outlier_type = "shape",
+  contam_frac = 0.20,
+  n = 20,
+  severity = 0.5,
+  noise_sd = 0.1,
+  seed = 42
+) {
+  source(file.path(base_dir, "sim-dgp.R"))
+  data <- generate_data(
+    dgp_name,
+    n = n,
+    n_grid = 101,
+    severity = severity,
+    noise_sd = noise_sd,
+    seed = seed
+  )
+  arg <- data$arg
+
+  data <- contaminate_data(
+    data,
+    contam_frac = contam_frac,
+    outlier_type = outlier_type,
+    noise_sd = noise_sd,
+    seed = seed
+  )
+  spec <- dgp_spec(dgp_name)
+  desc <- dgp_desc_labels()[[dgp_name]]
+  mask <- data$outlier_mask
+  n_outliers <- sum(mask)
+
+  # For phase outliers: regenerate the extreme warps for display
+  # (contaminate_data replaces observed curves but doesn't store the warps)
+  if (outlier_type == "phase" && n_outliers > 0) {
+    old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) {
+      .Random.seed
+    } else {
+      NULL
+    }
+    set.seed(seed + 10000L)
+    # Advance RNG past sample.int (same call as contaminate_data)
+    sample.int(n, n_outliers)
+    # Now generate the same extreme warps
+    extreme_warps <- generate_smooth_warps(
+      n_outliers,
+      arg,
+      severity = 3.0,
+      gp_type = "simple"
+    )
+    if (!is.null(old_seed)) .Random.seed <<- old_seed
+  }
+
+  # Template
+  tpl_df <- tf_to_df(data$template)
+  p_template <- ggplot2::ggplot(tpl_df, ggplot2::aes(arg, value)) +
+    ggplot2::geom_line() +
+    ggplot2::labs(
+      title = sprintf("%s — %s outliers", desc, outlier_type),
+      x = "t",
+      y = "template"
+    ) +
+    theme_benchmark(base_size = 9)
+
+  # Warps panel
+  if (outlier_type == "phase" && n_outliers > 0) {
+    # Show inlier warps in black + extreme outlier warps in red
+    inlier_warps <- data$warps[!mask]
+    warp_inlier_df <- tf_to_df(inlier_warps)
+    warp_inlier_df$outlier <- FALSE
+
+    warp_outlier_df <- tf_to_df(extreme_warps)
+    warp_outlier_df$outlier <- TRUE
+    # Re-index outlier IDs to avoid overlap
+    warp_outlier_df$id <- factor(
+      as.integer(warp_outlier_df$id) + length(inlier_warps)
+    )
+
+    warp_df <- rbind(warp_inlier_df, warp_outlier_df)
+  } else {
+    warp_df <- tf_to_df(data$warps)
+    warp_df$outlier <- rep(mask, each = length(unique(warp_df$arg)))
+  }
+
+  p_warps <- ggplot2::ggplot(
+    warp_df,
+    ggplot2::aes(arg, value, group = id, color = outlier)
+  ) +
+    ggplot2::geom_line(
+      data = warp_df[!warp_df$outlier, ],
+      alpha = 0.4
+    ) +
+    ggplot2::geom_line(
+      data = warp_df[warp_df$outlier, ],
+      alpha = 0.5
+    ) +
+    ggplot2::geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      color = "grey40"
+    ) +
+    ggplot2::scale_color_manual(
+      values = c("FALSE" = "black", "TRUE" = "#E41A1C"),
+      guide = "none"
+    ) +
+    ggplot2::labs(
+      title = if (outlier_type == "phase") {
+        "Warps (red = extreme, sev=3.0)"
+      } else {
+        sprintf("Warps (%s)", spec$phase)
+      },
+      x = "t",
+      y = "h(t)"
+    ) +
+    theme_benchmark(base_size = 9)
+
+  # Observed data with contamination
+  obs_df <- tf_to_df(data$x)
+  obs_df$outlier <- rep(mask, each = length(unique(obs_df$arg)))
+
+  p_data <- ggplot2::ggplot(
+    obs_df,
+    ggplot2::aes(arg, value, group = id, color = outlier)
+  ) +
+    ggplot2::geom_line(
+      data = obs_df[!obs_df$outlier, ],
+      alpha = 0.3
+    ) +
+    ggplot2::geom_line(
+      data = obs_df[obs_df$outlier, ],
+      alpha = 0.5
+    ) +
+    ggplot2::scale_color_manual(
+      values = c("FALSE" = "black", "TRUE" = "#E41A1C"),
+      guide = "none"
+    ) +
+    ggplot2::labs(
+      title = sprintf("Observed (%d%% contaminated)", round(100 * contam_frac)),
+      x = "t",
+      y = "x(t)"
+    ) +
+    theme_benchmark(base_size = 9)
+
+  p_template + p_warps + p_data + patchwork::plot_layout(nrow = 1)
+}
+
+#' Case study: run all methods on clean vs contaminated data, return template
+#' comparison plot
+#'
+#' @param dgp_name DGP identifier (e.g. "D02")
+#' @param outlier_type "shape" or "phase"
+#' @param contam_frac contamination fraction
+#' @param noise_sd noise level
+#' @param severity warp severity
+#' @param n number of curves
+#' @param seed random seed
+#' @param methods character vector of method names to run
+#' @return list with: plot (patchwork), metrics (data.frame)
+make_contam_case_study <- function(
+  dgp_name,
+  outlier_type = "phase",
+  contam_frac = 0.20,
+  noise_sd = 0.1,
+  severity = 0.5,
+  n = 50,
+  seed = 42,
+  methods = c("srvf", "fda_default", "fda_crit1", "affine_ss", "landmark_auto")
+) {
+  source(file.path(base_dir, "sim-dgp.R"))
+  source(file.path(base_dir, "sim-methods.R"))
+  source(file.path(base_dir, "sim-metrics.R"))
+
+  # Generate clean data
+  data_clean <- generate_data(
+    dgp_name,
+    n = n,
+    n_grid = 101,
+    severity = severity,
+    noise_sd = noise_sd,
+    seed = seed
+  )
+
+  # Generate contaminated data (same base)
+  data_contam <- generate_data(
+    dgp_name,
+    n = n,
+    n_grid = 101,
+    severity = severity,
+    noise_sd = noise_sd,
+    seed = seed
+  )
+  data_contam <- contaminate_data(
+    data_contam,
+    contam_frac = contam_frac,
+    outlier_type = outlier_type,
+    noise_sd = noise_sd,
+    seed = seed
+  )
+
+  arg <- data_clean$arg
+  template_true <- data_clean$template
+  tpl_true_df <- tf_to_df(template_true)
+  tpl_true_df$type <- "True template"
+
+  mlabs <- method_labels()
+  mcols <- method_colors()
+
+  plots <- list()
+  metrics_list <- list()
+
+  for (m in methods) {
+    # Run on clean data
+    res_clean <- tryCatch(
+      fit_method(data_clean, m),
+      error = function(e)
+        list(registration = NULL, time = NA, error = e$message)
+    )
+    # Run on contaminated data
+    res_contam <- tryCatch(
+      fit_method(data_contam, m),
+      error = function(e)
+        list(registration = NULL, time = NA, error = e$message)
+    )
+
+    # Extract metrics
+    m_clean <- if (is.null(res_clean$error)) {
+      extract_metrics(data_clean, res_clean)
+    } else {
+      failure_metrics(res_clean)
+    }
+    m_contam <- if (is.null(res_contam$error)) {
+      extract_metrics(
+        data_contam,
+        res_contam,
+        outlier_mask = data_contam$outlier_mask
+      )
+    } else {
+      failure_metrics(res_contam)
+    }
+    metrics_list[[m]] <- list(clean = m_clean, contam = m_contam)
+
+    # Build template comparison plot for this method
+    for (condition in c("clean", "contam")) {
+      res <- if (condition == "clean") res_clean else res_contam
+      label <- if (condition == "clean") "Clean" else {
+        sprintf("%d%% %s", round(100 * contam_frac), outlier_type)
+      }
+
+      if (!is.null(res$registration)) {
+        tpl_est <- tf_template(res$registration)
+        tpl_est_df <- tf_to_df(tpl_est)
+        tpl_est_df$type <- "Estimated"
+
+        aligned <- tf_aligned(res$registration)
+        aligned_df <- tf_to_df(aligned)
+
+        p <- ggplot2::ggplot() +
+          ggplot2::geom_line(
+            data = aligned_df,
+            ggplot2::aes(arg, value, group = id),
+            alpha = 0.15,
+            color = "grey60"
+          ) +
+          ggplot2::geom_line(
+            data = tpl_true_df,
+            ggplot2::aes(arg, value),
+            color = "black",
+            linewidth = 1
+          ) +
+          ggplot2::geom_line(
+            data = tpl_est_df,
+            ggplot2::aes(arg, value),
+            color = mcols[m],
+            linewidth = 1,
+            linetype = "dashed"
+          ) +
+          ggplot2::labs(
+            title = if (condition == "clean") mlabs[m] else NULL,
+            subtitle = label,
+            x = "t",
+            y = "x(t)"
+          ) +
+          theme_benchmark(base_size = 8)
+      } else {
+        p <- ggplot2::ggplot() +
+          ggplot2::annotate("text", x = 0.5, y = 0.5, label = "FAILED") +
+          ggplot2::labs(
+            title = if (condition == "clean") mlabs[m] else NULL,
+            subtitle = label
+          ) +
+          theme_benchmark(base_size = 8)
+      }
+      plots[[paste0(m, "_", condition)]] <- p
+    }
+  }
+
+  # Arrange: methods as columns, clean/contam as rows
+  plot_list <- list()
+  for (m in methods) {
+    plot_list <- c(
+      plot_list,
+      list(
+        plots[[paste0(m, "_clean")]],
+        plots[[paste0(m, "_contam")]]
+      )
+    )
+  }
+
+  combined <- patchwork::wrap_plots(
+    plot_list,
+    ncol = length(methods),
+    byrow = FALSE
+  )
+
+  # Build metrics summary table
+  metrics_df <- do.call(
+    rbind,
+    lapply(methods, function(m) {
+      mc <- metrics_list[[m]]$clean
+      mm <- metrics_list[[m]]$contam
+      data.frame(
+        method = mlabs[m],
+        tmise_clean = mc$template_mise,
+        tmise_contam = mm$template_mise,
+        edist_clean = mc$template_elastic_dist,
+        edist_contam = mm$template_elastic_dist,
+        stringsAsFactors = FALSE
+      )
+    })
+  )
+
+  list(plot = combined, metrics = metrics_df)
 }

@@ -19,7 +19,7 @@ if (requireNamespace("tf", quietly = TRUE)) library(tf) else
 #' @param data list from generate_data()
 #' @param result list from fit_method() with: registration, time, error
 #' @return named list of metric values
-extract_metrics <- function(data, result) {
+extract_metrics <- function(data, result, outlier_mask = NULL) {
   if (!is.null(result$error)) {
     return(failure_metrics(result))
   }
@@ -34,14 +34,29 @@ extract_metrics <- function(data, result) {
   true_prewarp <- data$true_prewarp
   n <- length(aligned)
 
+  # Subset to inlier curves for per-curve metrics (Study E).
+  # Template metrics use all curves (template quality IS affected by outliers).
+  if (!is.null(outlier_mask) && any(outlier_mask)) {
+    inlier <- !outlier_mask
+    aligned_inlier <- aligned[inlier]
+    inv_warps_inlier <- inv_warps_est[inlier]
+    warps_true_inlier <- warps_true[inlier]
+    true_prewarp_inlier <- true_prewarp[inlier]
+  } else {
+    aligned_inlier <- aligned
+    inv_warps_inlier <- inv_warps_est
+    warps_true_inlier <- warps_true
+    true_prewarp_inlier <- true_prewarp
+  }
+
   # Compare forward warps for all methods and DGPs.
   # tf_registration stores inverse warps, so invert once here to recover the
   # estimated forward warp h(s) = t on the benchmark grid.
-  warp_cmp_est <- safe_metric(function() tf_invert(inv_warps_est))
-  warp_cmp_true <- warps_true
+  warp_cmp_est <- safe_metric(function() tf_invert(inv_warps_inlier))
+  warp_cmp_true <- warps_true_inlier
 
   metrics <- list(
-    # Primary
+    # Primary (inlier curves only)
     warp_mise = safe_metric(
       compute_warp_mise,
       warp_cmp_est,
@@ -50,9 +65,10 @@ extract_metrics <- function(data, result) {
     ),
     alignment_error = safe_metric(
       compute_alignment_error,
-      aligned,
-      true_prewarp
+      aligned_inlier,
+      true_prewarp_inlier
     ),
+    # Template metrics (all curves — measures template quality under contamination)
     template_mise = safe_metric(
       compute_template_mise,
       template_est,
@@ -64,14 +80,14 @@ extract_metrics <- function(data, result) {
       template_true,
       arg
     ),
-    # Secondary
+    # Secondary (inlier curves only)
     alignment_cc = safe_metric(
       compute_alignment_cc,
-      aligned,
+      aligned_inlier,
       template_true
     ),
     time_per_curve = result$time / n,
-    # Diagnostics
+    # Diagnostics (inlier curves only)
     registration_ratio = safe_metric(
       compute_registration_ratio,
       warp_cmp_est,
@@ -80,9 +96,9 @@ extract_metrics <- function(data, result) {
     ),
     amp_variance_ratio = safe_metric(
       compute_amp_variance_ratio,
-      aligned,
+      aligned_inlier,
       template_est,
-      true_prewarp,
+      true_prewarp_inlier,
       template_true
     ),
     warp_slope_ratio = safe_metric(

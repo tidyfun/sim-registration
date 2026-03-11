@@ -91,13 +91,14 @@ run_one_task <- function(task) {
     error = function(e) list(error = conditionMessage(e))
   )
 
-  # Apply contamination (Study D)
+  # Apply contamination (Study E)
   if (!is.null(data$x) && !is.null(task$contam_frac)) {
     data <- tryCatch(
       contaminate_data(
         data,
         contam_frac = task$contam_frac,
         outlier_type = task$outlier_type,
+        noise_sd = task$noise_sd,
         seed = task$seed
       ),
       error = function(e) {
@@ -120,7 +121,7 @@ run_one_task <- function(task) {
         use_true_template = task$use_true_template %||% FALSE,
         lambda = task$lambda
       )
-      m <- extract_metrics(data, result)
+      m <- extract_metrics(data, result, outlier_mask = data$outlier_mask)
       m$error_msg <- result$error %||% ""
       m
     },

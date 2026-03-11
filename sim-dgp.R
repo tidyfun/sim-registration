@@ -5,7 +5,7 @@
 #   generate_warps()      - 3 warp types (simple, complex, affine)
 #   generate_amplitude()  - 4 amplitude types (none, rank1_mult, rank2, highrank)
 #   generate_data()       - main entry point
-#   contaminate_data()    - outlier injection for Study D
+#   contaminate_data()    - outlier injection for Study E
 
 if (requireNamespace("tf", quietly = TRUE)) library(tf) else
   devtools::load_all()
@@ -474,6 +474,7 @@ contaminate_data <- function(
   data,
   contam_frac = 0.10,
   outlier_type = c("shape", "phase"),
+  noise_sd = 0,
   seed = NULL
 ) {
   outlier_type <- match.arg(outlier_type)
@@ -520,6 +521,22 @@ contaminate_data <- function(
         x_mat[outlier_idx[j], ] <- x_mat[outlier_idx[j], ] +
           amp * sin(freq * pi * arg + phase)
       }
+
+      # Standardize shape outliers to match inlier marginal distribution
+      # (pure shape outliers, not magnitude outliers)
+      inlier_mat <- x_mat[!outlier_mask, , drop = FALSE]
+      inlier_mean <- colMeans(inlier_mat)
+      inlier_sd <- apply(inlier_mat, 2, sd)
+      inlier_sd[inlier_sd < 1e-10] <- 1e-10
+
+      for (j in seq_along(outlier_idx)) {
+        row <- x_mat[outlier_idx[j], ]
+        row_mean <- mean(row)
+        row_sd <- sd(row)
+        if (row_sd < 1e-10) row_sd <- 1e-10
+        x_mat[outlier_idx[j], ] <- inlier_mean +
+          inlier_sd * (row - row_mean) / row_sd
+      }
     },
 
     phase = {
@@ -540,6 +557,13 @@ contaminate_data <- function(
           xout = w,
           rule = 2
         )$y
+      }
+      # Add same noise as inlier curves
+      if (noise_sd > 0) {
+        for (j in seq_along(outlier_idx)) {
+          x_mat[outlier_idx[j], ] <- x_mat[outlier_idx[j], ] +
+            rnorm(length(arg), 0, noise_sd)
+        }
       }
     }
   )
