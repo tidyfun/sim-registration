@@ -139,8 +139,8 @@ comparison ladders that previously had missing starting points.
 | Method | Call | Notes |
 |--------|------|-------|
 | srvf | `tf_register(x, method="srvf")` | SRVF elastic |
-| fda_default | `tf_register(x, method="fda")` | FDA criterion 2 |
-| fda_crit1 | `tf_register(x, method="fda", crit=1)` | FDA criterion 1 |
+| cc_default | `tf_register(x, method="fda")` | FDA criterion 2 |
+| cc_crit1 | `tf_register(x, method="fda", crit=1)` | FDA criterion 1 |
 | affine_ss | `tf_register(x, method="affine", type="shift_scale")` | Shift+scale |
 | landmark_auto | `tf_register(x, method="landmark", landmarks=...)` | Auto landmarks |
 
@@ -187,7 +187,7 @@ SRVF vs FDA) flip under high noise, since unregularized SRVF operates on SRSFs
 (derivatives) which amplify high-frequency noise.
 
 ### Study B: Penalization (~19,000 runs)
-4 DGPs x 8 lambdas x 3 methods (srvf, fda_default, fda_crit1)
+4 DGPs x 8 lambdas x 3 methods (srvf, cc_default, cc_crit1)
 x 3 noise (0, 0.1, 0.3) x 2 severity = 576 cells x ~33 reps
 
 **Purpose**: Test whether regularization (lambda > 0) can rescue methods in regimes
@@ -206,24 +206,24 @@ where they struggle, particularly SRVF under high noise.
 `c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)` — 8 values spanning 5 orders of magnitude.
 
 Lambda pilot findings (2 DGPs × 10 lambdas × 3 methods × 3 noise × 10 reps = 1,800 runs):
-- **Methods need very different lambda ranges.** fda_default optimal: 1e-4 (D02) to
-  0.5–10 (D12). fda_crit1 optimal: 1e-3 (D02) to 0.05–0.1 (D12). SRVF optimal:
+- **Methods need very different lambda ranges.** cc_default optimal: 1e-4 (D02) to
+  0.5–10 (D12). cc_crit1 optimal: 1e-3 (D02) to 0.05–0.1 (D12). SRVF optimal:
   1e-4 (clean) to 10 (noisy D02) — but lambda=0 is best on D12 regardless of noise.
 - **SRVF lambda×noise interaction is enormous on D02**: λ*=1e-4 at noise=0, λ*=5e-3
   at noise=0.1, λ*=10 at noise=0.3. On D12 the optimal is λ=0 at all noise levels —
   regularization only hurts.
-- **FDA benefits substantially on D12**: fda_crit1 improves 50–60%, fda_default
+- **FDA benefits substantially on D12**: cc_crit1 improves 50–60%, cc_default
   improves 45–52%. Smaller improvement on D02 (10–25%).
-- **fda_crit1 vs fda_default respond differently**: fda_crit1 optimal is consistently
-  higher than fda_default on D02 (1e-3 vs 1e-4), but lower on D12 (0.05–0.1 vs
+- **cc_crit1 vs cc_default respond differently**: cc_crit1 optimal is consistently
+  higher than cc_default on D02 (1e-3 vs 1e-4), but lower on D12 (0.05–0.1 vs
   0.5–10). The two criteria have qualitatively different lambda profiles.
 - **A shared lambda grid is justified**: the 8-value grid covers all methods' optima.
   Method-specific grids are unnecessary since the shared grid includes each method's
   optimal region.
 
 **Rationale for design choices**:
-- **+fda_crit1**: Criterion 1 penalizes warp roughness directly, so its interaction
-  with external lambda differs qualitatively from fda_default. Pilot confirmed:
+- **+cc_crit1**: Criterion 1 penalizes warp roughness directly, so its interaction
+  with external lambda differs qualitatively from cc_default. Pilot confirmed:
   different lambda profiles. [Council R4: unanimous]
 - **+noise=0.3**: The key regime where SRVF degrades (derivative amplification) and
   FDA rankings may flip. Pilot confirmed: SRVF optimal lambda jumps 5 orders of
@@ -239,9 +239,9 @@ Lambda pilot findings (2 DGPs × 10 lambdas × 3 methods × 3 noise × 10 reps =
 
 **Key analyses**:
 - Lambda × noise interaction: does optimal lambda shift with noise level?
-- Per-DGP optimal lambda profiles for SRVF vs FDA (and fda_crit1 vs fda_default)
+- Per-DGP optimal lambda profiles for SRVF vs FDA (and cc_crit1 vs cc_default)
 - Warp MISE vs lambda curves (U-shape confirmed by pilot for FDA; monotone for SRVF on D12)
-- fda_crit1 vs fda_default: criterion choice interacts with lambda (pilot-confirmed)
+- cc_crit1 vs cc_default: criterion choice interacts with lambda (pilot-confirmed)
 - Does lambda rescue SRVF at noise=0.3? (pilot suggests: only on D02, not D12)
 
 **Remaining question after analysis**: Study B identifies oracle-optimal lambdas, but
@@ -420,7 +420,84 @@ adding more). [Council R4: Claude]
 alignment error, template MISE, and elastic distance need to be reported side by
 side rather than collapsed to a single global "most robust" method.
 
-**Total: ~45,850 runs (Studies B–E + grid×lambda cross-check) + 45,000 (Study A) ≈ 91,000 runs**
+### Study F: SRVF pre-smoothing rescue study (~32,400 runs)
+9 DGPs x 3 noise x 2 severity x 6 SRVF preprocessing variants x 100 reps
+= 324 cells x 100 reps = 32,400 runs
+
+**Purpose**: Test whether simple pre-smoothing of noisy inputs can rescue SRVF in
+the non-affine settings where it loses under noise, while keeping evaluation
+comparable to the original Study A benchmark.
+
+**DGP selection**:
+- Weak harmonic ladders where SRVF loses under noise: D01, D02, D05, D07, D09, D10
+- Wiggly controls where raw SRVF is already strong and smoothing could hurt:
+  D03, D12, D14
+
+**Preprocessing variants**:
+- Primary variants: `lowess_f015`, `spline_local_k25`
+- Sensitivity variants: `none`, `lowess_f010`,
+  `spline_local_k15`, `spline_global_k25`
+
+**Comparator strategy**:
+- Paired primary comparator: raw SRVF (`preproc = none`) in the same Study F
+  pipeline on the same `(dgp, rep)` seeds
+- No external multi-method baseline rerun: this follow-up is scoped only to the
+  question of whether pre-smoothing improves SRVF relative to raw SRVF
+
+**Evaluation rule**:
+- Estimate warps/template from pre-smoothed curves
+- Transfer estimated warps back to the original raw curves on the original grid
+  for comparable curve-level metrics versus raw SRVF
+- All smoothing is curve-wise, estimation-only, and fixed ex ante
+
+**Primary estimand**:
+- `mean(log((warp_mise_variant + eps) / (warp_mise_none + eps)))` with
+  `eps = 1e-12`
+- Rescue criterion in noisy weak cells:
+  `mean_log_ratio + 2 * MCSE < log(0.9)`
+- Non-inferiority criterion in clean/control cells:
+  `mean_log_ratio + 2 * MCSE < log(1.05)`
+
+**Supporting infrastructure**:
+- `study_f_pilot_design()` for the LRZ pilot
+- `study_f_design()` for production
+- `sim-report-presmoothing.qmd` for Study F analysis
+- LRZ job scripts: `slurm/pilot-f.slurm`, `slurm/study-f.slurm`
+
+**Implementation safeguards added during coding**:
+- Current `tf` on the `registration-api-redesign` branch returns a
+  `tf_registration` object with `registered`, `inv_warps`, `template`, and `x`.
+  Study F metrics therefore resolve those fields explicitly when present, with a
+  fallback path for older bare-warp returns.
+- Study F batches are split by `(dgp, method, study, preproc_id)` rather than
+  `(dgp, method, study)` so that one failed pre-smoothing arm does not force a
+  full DGP rerun.
+- `load_study_f()` prefers production `F` files over pilot `Fp` files once both
+  exist, preventing duplicate pilot rows from contaminating the production
+  report.
+- Run metadata now records LRZ module state plus the installed `tf` package
+  version, remote ref, and remote SHA for reproducibility.
+- Study F is tied to the LRZ installation of `tf` from `~/tf` on branch
+  `registration-api-redesign`, not to the older Study A environment.
+
+**Current LRZ execution status (2026-03-16)**:
+- Installed latest `tf` on LRZ from `~/tf`, branch `registration-api-redesign`,
+  updated from `639d19d` to `42b5377`, then reinstalled with `pak::pkg_install(".")`.
+- First LRZ pilot run (`5136147`) completed in 4.5 minutes and wrote 840 rows,
+  but all primary metrics were `NA` because the metric extractor still assumed
+  the older bare-warp API.
+- Those invalid pilot outputs were archived on LRZ under
+  `.codex-backup-fp-rerun-20260316-142629`.
+- Patched Study F code was synced to LRZ and a clean rerun pilot was submitted
+  as job `5136216` (32 cores); an 8-core backfill-friendly duplicate was also
+  submitted as job `5136277`.
+- A valid replacement pilot was completed on `cm4_tiny` as job `153002`; the two
+  redundant `serial` jobs were canceled.
+- A later `Study G` submission was canceled after clarifying that this follow-up
+  is SRVF-only; all remaining code and job scripts are now scoped to Study F.
+
+**Total with Study F**: ~91,000 runs from Studies A–E and cross-checks
++ 32,400 (Study F) ≈ 123,600 runs.
 
 ## 8. Code Structure
 
@@ -429,17 +506,18 @@ sim-registration/            Standalone repo (~/fda/sim-registration/)
   BENCHMARK-PLAN.md          This file
   gait_knee_fpcs.rds         Cached FPCs from registered gait knee angles
   sim-dgp.R          ~500 lines   Templates, warps, amplitude, generate_data()
-  sim-methods.R       ~110 lines   5 method wrappers returning tf_registration
-  sim-metrics.R       ~300 lines   All metrics using tf API (incl. SRSF elastic dist)
-  sim-config.R        ~280 lines   All study designs (A-E)
-  sim-run.R           ~300 lines   Runner with incremental saves per DGP
-  sim-validate.R      ~150 lines   Known-answer tests for v2
+  sim-methods.R       ~110 lines   Method wrappers + Study F pre-smoothing configs
+  sim-metrics.R       ~300 lines   All metrics using tf API (incl. transferred Study F metrics)
+  sim-config.R        ~280 lines   All study designs (A-F)
+  sim-run.R           ~300 lines   Runner with incremental saves + run metadata
+  sim-validate.R      ~150 lines   Known-answer tests + Study F path checks
   sim-analyze.R       ~1000 lines  Data loading, aggregation, plot helpers
   sim-report-main.qmd ~1700 lines  Quarto report (Study A analysis)
   sim-report-penalization.qmd      Quarto report (Study B)
   sim-report-grid.qmd              Quarto report (Study C: grid sensitivity)
   sim-report-oracle.qmd            Quarto report (Study D: oracle template)
   sim-report-outlier.qmd ~950 lines Quarto report (Study E: outlier contamination)
+  sim-report-presmoothing.qmd      Quarto report (Study F: SRVF pre-smoothing)
   sim-pilot-grid.R                 Grid pilot script
   sim-pilot-lambda.R               Lambda pilot script
   sim-pilot-grid-study.R           Study C pilot script
@@ -528,7 +606,7 @@ Second council reviewed study design, parameter ranges, and report quality:
 
 ### Phase 4: Validation (done)
 - Mini pilot (D01 + D09, 2 reps): all 5 methods work, 0 failures
-- D01 ranking: srvf (9.5e-6) > fda_crit1 (2.4e-5) > fda_default (2.1e-4) >
+- D01 ranking: srvf (9.5e-6) > cc_crit1 (2.4e-5) > cc_default (2.1e-4) >
   landmark_auto (1.5e-3) > affine_ss (2.2e-3) -- as expected
 
 ### Phase 5: LRZ Environment (done)
@@ -549,7 +627,7 @@ metric (fdasrvf::elastic.distance), interaction plots, alignment error section.
 ### Council Review R4 (done)
 Council of 3 AI agents (Claude, Codex, Gemini) reviewed Studies B–E design.
 Applied changes:
-1. Added fda_crit1 to Study B (unanimous) — different criterion, different lambda response
+1. Added cc_crit1 to Study B (unanimous) — different criterion, different lambda response
 2. Added hard condition (noise=0.3, severity=1.0) to Study D (2/3 reviewers)
 3. Added noise=0.3 to Study E + raised min contamination from 5% to 10% (Codex: discrete artifacts at n=50)
 4. Added grid × lambda cross-check to Study C (~1,800 runs, all 3 reviewers)
@@ -597,6 +675,34 @@ proper factor construction (n_grid, template_mode, condition).
 - SLURM scripts: `slurm/study-c.slurm`, `slurm/study-d.slurm`, `slurm/pilot-grid-study.slurm`,
   `slurm/pilot-oracle.slurm`
 
+### Phase 10: Study F implementation and LRZ pilot (in progress)
+
+- Added `study_f_pilot_design()` and `study_f_design()` to `sim-config.R`.
+- Added SRVF pre-smoothing wrappers in `sim-methods.R` for:
+  `none`, `lowess_f010`, `lowess_f015`,
+  `spline_local_k15`, `spline_local_k25`, `spline_global_k25`.
+- Added transferred raw-curve evaluation in `sim-metrics.R` so Study F keeps
+  curve-level metrics comparable to raw SRVF even when estimation uses
+  smoothed inputs.
+- Added `sim-report-presmoothing.qmd` and LRZ job scripts
+  `slurm/pilot-f.slurm`, `slurm/study-f.slurm`.
+- Added run metadata capture and completion manifests for Study F, including
+  `tf` package metadata from the LRZ installation.
+- Council review during implementation identified two key operational risks that
+  were fixed immediately:
+  1. Production reports must not mix pilot `Fp` rows with production `F` rows.
+  2. Study F batching should be finer than one full DGP to limit rerun cost.
+- LRZ pilot status:
+  - Initial pilot `5136147` exposed an API mismatch (`tf_registration` vs older
+    bare warp return) and produced invalid all-`NA` primary metrics despite
+    0% formal failures.
+  - Metric extraction was patched locally and synced to LRZ.
+  - Replacement pilot jobs `5136216` (32 cores) and `5136277` (8 cores) were
+    later superseded by a valid `cm4_tiny` pilot run (`153002`, 17 cores).
+  - Pilot review showed strong rescue in noisy weak cells but severe harm in
+    clean/wiggly controls, so Study F remains a conditional SRVF-vs-SRVF study,
+    not a global-default study.
+
 ### Council Review R5: Study D report (done)
 
 Council (Claude, Codex, Gemini) reviewed `sim-report-oracle.qmd`. All three
@@ -608,9 +714,9 @@ reviewers identified the same core issues. Revisions applied:
    oracle+single-pass", not a pure template ablation.
 2. **Heatmap scale fixed**: Widened from `c(-20, 100)` to `c(-170, 100)` with
    `oob = scales::squish`. Nine cells were previously misrendered.
-3. **fda_default negative oracle benefit elevated**: New dedicated section
+3. **cc_default negative oracle benefit elevated**: New dedicated section
    explaining two factors (iteration confound + criterion 2 objective mismatch).
-   Contrasted with fda_crit1 which shows much less negative benefit.
+   Contrasted with cc_crit1 which shows much less negative benefit.
 4. **Template-warp correlation conditioned on method**: Landmarks excluded, added
    within-method correlations, weakened causal language.
 5. **Summary prose fixed**: Removed overclaimed "bottleneck" conclusion, made
@@ -622,11 +728,11 @@ reviewers identified the same core issues. Revisions applied:
 
 - **SRVF**: Consistent positive oracle benefit (9–87%), growing from easy→hard.
   Cleanest evidence that template quality affects warp recovery.
-- **fda_default**: Large negative oracle benefit (-50% to -162% on several DGPs).
+- **cc_default**: Large negative oracle benefit (-50% to -162% on several DGPs).
   Estimated-template pipeline outperforms oracle, likely due to iteration confound
   and co-adaptation of criterion 2 objective with iteratively estimated template.
-- **fda_crit1**: Mostly positive oracle benefit (up to 72%), much less affected
-  by the confound than fda_default — criterion 1 (ISE) is less sensitive to
+- **cc_crit1**: Mostly positive oracle benefit (up to 72%), much less affected
+  by the confound than cc_default — criterion 1 (ISE) is less sensitive to
   iteration count.
 - **affine_ss**: Mixed results, DGP-dependent.
 - **landmark_auto**: Exactly 0% oracle benefit (expected — ignores template).
@@ -658,7 +764,7 @@ interpretations and correctness of conclusions. 7 fixes applied:
 ### Phase 10: Study B production run and analysis (done)
 
 - `study_b_design()` updated in sim-config.R: 4 DGPs (D01/D02/D09/D12) × 8 lambdas
-  (0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10) × 3 methods (SRVF, fda_default, fda_crit1)
+  (0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10) × 3 methods (SRVF, cc_default, cc_crit1)
   × 3 noise × 2 severity × 33 reps = 19,008 runs
 - LRZ job 5131577 (2026-03-10), 32 cores, serial_std, completed in 111 min
 - 0% failures across all 19,008 runs
@@ -682,7 +788,7 @@ practical recommendations for `tf_register()` lambda default. Key findings:
 4. **Template findings mixed optimization targets**: Selecting lambda by elastic
    distance then reporting MISE improvement overstates MISE gains. Fixed: each
    metric optimized independently.
-5. **"fda_crit1 benefits most" too strong**: fda_default wins 21/24 head-to-head
+5. **"cc_crit1 benefits most" too strong**: cc_default wins 21/24 head-to-head
    FDA cells. Reworded to "FDA methods benefit much more than SRVF".
 6. **No safe fixed non-zero default**: Even best fixed lambdas worsen 1–6/24
    cells with worst-case 2.6× degradation.
@@ -757,7 +863,7 @@ Awaiting completion.
 
 **Major unresolved questions exposed by the results**:
 - **Template estimation vs iterative refinement**: Study D shows large method
-  differences, especially for `fda_default`, but the oracle comparison is still
+  differences, especially for `cc_default`, but the oracle comparison is still
   confounded by iteration count. A matched-iteration ablation is needed before
   treating oracle benefit as pure template sensitivity.
 - **Practical tuning versus oracle tuning**: Study B shows that penalization can
@@ -771,7 +877,7 @@ Awaiting completion.
   recommendations for arbitrary functional registration problems.
 
 **Method-specific behavior still needing explanation**:
-- `fda_default` remains the strangest case: it often benefits most from lambda,
+- `cc_default` remains the strangest case: it often benefits most from lambda,
   yet can show negative oracle benefit, suggesting criterion-2-specific
   co-adaptation or iteration effects that are not fully understood.
 - `srvf` has two distinct regimes: very strong in clean settings and on template

@@ -1,21 +1,6 @@
 ---
-title: "Registration Benchmark v2 — Study E: Outlier Contamination"
-subtitle: "Internal Report — tf Package"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    toc-location: left
-    number-sections: true
-    code-fold: true
-    theme: flatly
-    fig-width: 10
-    fig-height: 6
-    self-contained: true
-execute:
-  cache: true
-  warning: false
-  message: false
+title: "Study E: Outlier Contamination"
+subtitle: "Registration Benchmark v2"
 ---
 
 # Setup {.unnumbered}
@@ -51,6 +36,24 @@ dt_baseline[, contam_frac := NULL]
 dt_baseline[, contam_frac := factor("0")]
 dt_baseline[, outlier_type := NULL]
 dt_baseline[, outlier_type := factor(NA, levels = c("shape", "phase"))]
+
+# Paired replicate ratios: merge Study E (reps 1-50) with Study A baseline reps 1-50
+# by (method, dgp, noise_sd, rep) to get per-replicate contamination vs clean ratios.
+pair_cols <- c("method", "dgp", "noise_sd", "rep")
+dt_paired <- merge(
+  dt[failure == FALSE, .(method, dgp, noise_sd, outlier_type, contam_frac, rep,
+    warp_mise, alignment_error, template_mise, template_elastic_dist)],
+  dt_baseline[failure == FALSE & rep %in% 1:50, .(method, dgp, noise_sd, rep,
+    warp_mise_base = warp_mise, aerr_base = alignment_error,
+    tmise_base = template_mise, edist_base = template_elastic_dist)],
+  by = pair_cols
+)
+dt_paired[, `:=`(
+  warp_ratio   = warp_mise / warp_mise_base,
+  aerr_ratio   = alignment_error / aerr_base,
+  tmise_ratio  = template_mise / tmise_base,
+  edist_ratio  = template_elastic_dist / edist_base
+)]
 ```
 
 Study E tests method robustness when a fraction of curves are outliers.
@@ -85,10 +88,10 @@ For **phase outliers**, the warps panel shows the actual extreme warps
 (severity = 3.0, red) used to generate the contaminated curves, alongside
 the original inlier warps (black).
 
-**Design note (v2):** Shape outlier curves are standardized to match the
-pointwise mean and standard deviation of inlier curves, so they are shape
-outliers only (not magnitude outliers). Both shape and phase outlier curves
-have the same noise level as inliers.
+**Design note (v2):** Shape outlier curves are approximately rescaled to
+match the inlier level and spread (using global, not pointwise, rescaling),
+so they are primarily shape outliers rather than magnitude outliers. Both
+shape and phase outlier curves have the same noise level as inliers.
 
 ::: {.panel-tabset}
 
@@ -97,7 +100,7 @@ have the same noise level as inliers.
 ```{r}
 #| label: gallery-shape
 #| fig-height: 9
-#| fig-cap: "Shape outliers: random sinusoids standardized to match inlier pointwise distribution."
+#| fig-cap: "Shape outliers: random sinusoids approximately rescaled to match inlier level and spread."
 make_contam_example("D02", "shape") /
   make_contam_example("D09", "shape") /
   make_contam_example("D12", "shape")
@@ -255,24 +258,19 @@ plots[["shape"]] / plots[["phase"]] +
 ```{r}
 #| label: degradation-ratios
 #| results: asis
-# Compute degradation ratio: MISE(contaminated) / MISE(clean)
-contam_ratios <- merge(contam_agg, base_agg,
-  by = c("method", "dgp", "noise_sd"),
-  suffixes = c("_contam", "_base"))
-contam_ratios[, ratio := warp_mise_contam / warp_mise_base]
-
-# Summary by method, outlier_type, fraction
-ratio_summary <- contam_ratios[,
+# Paired replicate ratios: warp_ratio = contaminated_i / baseline_i per rep
+# Aggregate: median [Q25, Q75] across reps, DGPs, noise
+ratio_summary <- dt_paired[,
   .(
-    median_ratio = round(median(ratio, na.rm = TRUE), 2),
-    q25 = round(quantile(ratio, 0.25, na.rm = TRUE), 2),
-    q75 = round(quantile(ratio, 0.75, na.rm = TRUE), 2)
+    median_ratio = round(median(warp_ratio, na.rm = TRUE), 2),
+    q25 = round(quantile(warp_ratio, 0.25, na.rm = TRUE), 2),
+    q75 = round(quantile(warp_ratio, 0.75, na.rm = TRUE), 2)
   ),
   by = .(method, outlier_type, contam_frac)
 ]
 
-cat("Degradation ratio (contaminated / baseline warp MISE) ",
-    "— median [Q25, Q75] across DGPs and noise levels:\n\n")
+cat("Degradation ratio (contaminated / baseline warp MISE, per-replicate paired) ",
+    "— median [Q25, Q75] across reps, DGPs, and noise levels:\n\n")
 
 for (otype in c("shape", "phase")) {
   cat(sprintf("\n### %s outliers\n\n", tools::toTitleCase(otype)))
@@ -287,9 +285,9 @@ for (otype in c("shape", "phase")) {
 ```{r}
 #| label: degradation-findings
 #| results: asis
-# Which outlier type is more damaging?
-type_comparison <- contam_ratios[,
-  .(median_ratio = median(ratio, na.rm = TRUE)),
+# Which outlier type is more damaging? Use paired ratios.
+type_comparison <- dt_paired[,
+  .(median_ratio = median(warp_ratio, na.rm = TRUE)),
   by = .(method, outlier_type, contam_frac)
 ]
 type_wide <- dcast(type_comparison,
@@ -377,12 +375,40 @@ for (i in seq_len(nrow(sp_at_30))) {
     mlabs[m], r, fmt_mean_se(sp_at_30$mean_ratio[i], sp_at_30$se_ratio[i]), direction))
 }
 
+# Check whether phase > shape for Landmark and Affine at 30%
+lm_row <- sp_at_30[method == "landmark_auto"]
+aff_row <- sp_at_30[method == "affine_ss"]
+lm_phase_worse <- !is.null(lm_row) && nrow(lm_row) > 0 && lm_row$median_ratio < 1
+aff_phase_worse <- !is.null(aff_row) && nrow(aff_row) > 0 && aff_row$median_ratio < 1
+
 cat("\nThe pattern is consistent across contamination fractions: **iterative ",
-    "template-based methods** (SRVF, FDA) are more damaged by phase outliers, ",
-    "which pull the iterative template estimate toward extreme warps. ",
-    "**Landmark** is roughly equally affected by both types. ",
-    "**Affine** is approximately equally sensitive to both, likely because ",
-    "its shift+scale model cannot accommodate either type of outlier.\n")
+    "template-based methods** (SRVF, CC) are more damaged by phase outliers, ",
+    "which pull the iterative template estimate toward extreme warps.\n")
+
+if (lm_phase_worse) {
+  cat(sprintf(
+    "**Landmark** is also worse under phase outliers than shape outliers at 30%% contamination (median shape/phase ratio %.2f×, i.e. phase > shape). ",
+    lm_row$median_ratio))
+} else if (!is.null(lm_row) && nrow(lm_row) > 0) {
+  cat(sprintf(
+    "**Landmark** is slightly worse under shape outliers at 30%% contamination (median shape/phase ratio %.2f×). ",
+    lm_row$median_ratio))
+} else {
+  cat("**Landmark** results are unavailable at 30%% contamination. ")
+}
+
+if (aff_phase_worse) {
+  cat(sprintf(
+    "**Affine** is also more sensitive to phase outliers (median shape/phase ratio %.2f×), ",
+    aff_row$median_ratio))
+} else if (!is.null(aff_row) && nrow(aff_row) > 0) {
+  cat(sprintf(
+    "**Affine** shows roughly equal sensitivity to both types (median shape/phase ratio %.2f×), ",
+    aff_row$median_ratio))
+} else {
+  cat("**Affine** results are unavailable. ")
+}
+cat("likely because its shift+scale model cannot fully accommodate either type of outlier.\n")
 ```
 
 # Noise × Contamination Interaction
@@ -393,13 +419,13 @@ noise = 0.1 overestimates practical robustness.
 ```{r}
 #| label: noise-contam-interaction
 #| fig-height: 8
-#| fig-cap: "Noise × contamination interaction. Points show median degradation ratios and vertical bars show IQRs across DGPs."
-# Compare degradation ratios at noise=0.1 vs noise=0.3
-noise_interact <- contam_ratios[,
+#| fig-cap: "Noise × contamination interaction. Points show median paired degradation ratios and vertical bars show IQRs across reps and DGPs."
+# Compare paired degradation ratios at noise=0.1 vs noise=0.3
+noise_interact <- dt_paired[,
   .(
-    median_ratio = median(ratio, na.rm = TRUE),
-    q25 = quantile(ratio, 0.25, na.rm = TRUE),
-    q75 = quantile(ratio, 0.75, na.rm = TRUE)
+    median_ratio = median(warp_ratio, na.rm = TRUE),
+    q25 = quantile(warp_ratio, 0.25, na.rm = TRUE),
+    q75 = quantile(warp_ratio, 0.75, na.rm = TRUE)
   ),
   by = .(method, noise_sd, outlier_type, contam_frac)
 ]
@@ -595,13 +621,14 @@ plots_edist[["shape"]] / plots_edist[["phase"]] +
   theme(legend.position = "bottom")
 ```
 
-## Case study: SRVF template improvement under contamination
+## Case study: SRVF template quality under contamination
 
-The elastic distance results show SRVF's template quality can paradoxically
-*improve* under contamination. This section visualizes a specific instance:
-all five methods are run on the same dataset with and without contamination.
-Black solid line = true template; colored dashed line = estimated template;
-grey lines = aligned curves.
+This section visualizes a specific instance of how contamination affects
+template estimation: all five methods are run on the same dataset with and
+without contamination. Black solid line = true template; colored dashed line =
+estimated template; grey lines = aligned curves. The case study illustrates
+the mechanisms at work in a single draw; aggregate results over all replicates
+are reported in the ratio tables above.
 
 ```{r}
 #| label: case-study-setup
@@ -648,50 +675,49 @@ knitr::kable(display, align = "lcccccc",
 srvf_row <- mdf[mdf$method == "SRVF", ]
 if (srvf_row$edist_ratio < 1) {
   cat(sprintf(
-    "**SRVF's elastic distance decreases from %s to %s (ratio %.2f\u00d7)**. ",
+    "In this particular draw, SRVF's elastic distance decreases from %s to %s (ratio %.2f\u00d7). ",
     fmt(srvf_row$edist_clean), fmt(srvf_row$edist_contam),
     srvf_row$edist_ratio))
-  cat("This single realization is consistent with the aggregate phase-outlier ",
-      "pattern, but should be read as an illustration rather than proof of mechanism. ",
-      "A plausible interpretation is that SRVF absorbs more of the extreme warping ",
-      "into phase than into the template in this draw.\n")
+  cat("**This is a single realization and should not be taken as representative**: ",
+      "on paired replicate ratios aggregated across the full Study E design, SRVF's ",
+      "elastic distance consistently increases under contamination (ratio > 1). ",
+      "A plausible interpretation for this draw is that SRVF absorbs more of the ",
+      "extreme warping into phase than into the template estimate.\n")
 } else {
   cat(sprintf(
-    "In this particular realization, SRVF elastic distance ratio is %.2f\u00d7. ",
+    "In this particular realization, SRVF elastic distance ratio is %.2f\u00d7 — no apparent improvement. ",
     srvf_row$edist_ratio))
-  cat("The paradoxical improvement is a stochastic phenomenon that appears ",
-      "in aggregate across many replications.\n")
+  cat("Across the full paired replicate analysis, SRVF elastic distance ",
+      "consistently increases under contamination.\n")
 }
 ```
 
 ```{r}
 #| label: template-bias-findings
 #| results: asis
-# Template MISE degradation ratios
-tmise_ratios <- merge(tmise_contam, tmise_base,
-  by = c("method", "dgp", "noise_sd"),
-  suffixes = c("_contam", "_base"))
-tmise_ratios[, ratio := template_mise_contam / template_mise_base]
-
-tmise_ratio_summary <- tmise_ratios[,
-  .(median_ratio = round(median(ratio, na.rm = TRUE), 2)),
+# Paired replicate ratios for template MISE and elastic distance
+tmise_ratio_summary <- dt_paired[!is.na(tmise_ratio),
+  .(median_ratio = round(median(tmise_ratio, na.rm = TRUE), 2)),
   by = .(method, outlier_type, contam_frac)
 ]
+# Also store for heatmap use
+tmise_ratios <- dt_paired[!is.na(tmise_ratio),
+  .(ratio = median(tmise_ratio, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, outlier_type, contam_frac)
+]
 
-# Elastic distance degradation ratios
-edist_ratios <- merge(edist_contam, edist_base,
-  by = c("method", "dgp", "noise_sd"),
-  suffixes = c("_contam", "_base"))
-edist_ratios[, ratio := edist_contam / edist_base]
-
-edist_ratio_summary <- edist_ratios[,
-  .(median_ratio = round(median(ratio, na.rm = TRUE), 2)),
+edist_ratio_summary <- dt_paired[!is.na(edist_ratio),
+  .(median_ratio = round(median(edist_ratio, na.rm = TRUE), 2)),
   by = .(method, outlier_type, contam_frac)
+]
+edist_ratios <- dt_paired[!is.na(edist_ratio),
+  .(ratio = median(edist_ratio, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, outlier_type, contam_frac)
 ]
 
 cat("### Degradation ratios at 30% contamination\n\n")
 cat("Template MISE and elastic distance degradation ",
-    "(contaminated / baseline):\n\n")
+    "(contaminated / baseline, per-replicate paired):\n\n")
 
 for (otype in c("shape", "phase")) {
   cat(sprintf("\n**%s outliers:**\n\n", tools::toTitleCase(otype)))
@@ -712,14 +738,25 @@ for (otype in c("shape", "phase")) {
   cat("\n")
 }
 
+# Check whether SRVF edist ratio is ever < 1 in the aggregated paired summary
+srvf_edist_phase <- edist_ratio_summary[
+  method == "srvf" & outlier_type == "phase"]
+srvf_edist_any_below1 <- any(srvf_edist_phase$median_ratio < 1, na.rm = TRUE)
+
 cat("**Key observation**: Template MISE and elastic distance tell very different ",
-    "stories. Landmark has the worst template MISE degradation (up to ~28× for ",
-    "shape outliers) but only moderate elastic distance degradation (~2×). This ",
-    "means outliers shift the template *position* (L² error) without greatly ",
-    "distorting its *shape* (elastic distance). Conversely, SRVF's elastic ",
-    "distance sometimes *decreases* under phase contamination (ratio < 1) in the ",
-    "aggregate summaries, suggesting a phase/template tradeoff rather than simple ",
-    "uniform degradation.\n")
+    "stories. Landmark has the worst template MISE degradation but only moderate ",
+    "elastic distance degradation — outliers shift the template *position* (L² error) ",
+    "without greatly distorting its *shape* (elastic distance). ")
+if (srvf_edist_any_below1) {
+  cat("SRVF's elastic distance median paired ratio falls below 1 in some cells ",
+      "under phase contamination, pointing to a phase/template tradeoff.\n")
+} else {
+  cat("On paired replicate ratios, SRVF's elastic distance consistently increases ",
+      "under contamination (ratio > 1), albeit typically by less than other metrics. ",
+      "The individual-replicate case study below illustrates a single draw where ",
+      "SRVF shows an apparent improvement, but this is not representative of the ",
+      "aggregate pattern.\n")
+}
 ```
 
 # Alignment Error Degradation
@@ -788,22 +825,22 @@ plots_aerr[["shape"]] / plots_aerr[["phase"]] +
 ```{r}
 #| label: alignment-error-ratios
 #| results: asis
-# Compute alignment error degradation ratios
-aerr_ratios <- merge(aerr_contam, aerr_base,
-  by = c("method", "dgp", "noise_sd"),
-  suffixes = c("_contam", "_base"))
-aerr_ratios[, ratio := alignment_error_contam / alignment_error_base]
-
-aerr_ratio_summary <- aerr_ratios[,
+# Paired replicate ratios for alignment error
+aerr_ratio_summary <- dt_paired[,
   .(
-    median_ratio = round(median(ratio, na.rm = TRUE), 2),
-    q25 = round(quantile(ratio, 0.25, na.rm = TRUE), 2),
-    q75 = round(quantile(ratio, 0.75, na.rm = TRUE), 2)
+    median_ratio = round(median(aerr_ratio, na.rm = TRUE), 2),
+    q25 = round(quantile(aerr_ratio, 0.25, na.rm = TRUE), 2),
+    q75 = round(quantile(aerr_ratio, 0.75, na.rm = TRUE), 2)
   ),
   by = .(method, outlier_type, contam_frac)
 ]
+# Also store per-cell ratios for heatmap and ranking
+aerr_ratios <- dt_paired[,
+  .(ratio = median(aerr_ratio, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, outlier_type, contam_frac)
+]
 
-cat("Alignment error degradation ratio (contaminated / baseline) ",
+cat("Alignment error degradation ratio (contaminated / baseline, per-replicate paired) ",
     "— median [Q25, Q75]:\n\n")
 for (otype in c("shape", "phase")) {
   cat(sprintf("\n### %s outliers\n\n", tools::toTitleCase(otype)))
@@ -818,31 +855,35 @@ for (otype in c("shape", "phase")) {
 ```{r}
 #| label: alignment-error-findings
 #| results: asis
-# Compare alignment error vs warp MISE rankings
-aerr_at_30 <- aerr_ratios[contam_frac == "0.3",
-  .(aerr_ratio = median(ratio)), by = method][order(aerr_ratio)]
-wmise_at_30 <- contam_ratios[contam_frac == "0.3",
-  .(wmise_ratio = median(ratio)), by = method][order(wmise_ratio)]
+# Compare alignment error vs warp MISE rankings using paired ratios
+aerr_at_30 <- dt_paired[contam_frac == "0.3",
+  .(aerr_ratio = median(aerr_ratio, na.rm = TRUE)), by = method][order(aerr_ratio)]
+wmise_at_30 <- dt_paired[contam_frac == "0.3",
+  .(wmise_ratio = median(warp_ratio, na.rm = TRUE)), by = method][order(wmise_ratio)]
 
 merged_rank <- merge(aerr_at_30, wmise_at_30, by = "method")
 merged_rank[, aerr_rank := rank(aerr_ratio)]
 merged_rank[, wmise_rank := rank(wmise_ratio)]
 
-cat("**Alignment error vs warp MISE robustness ranking at 30%:**\n\n")
-cat("| Method | Alignment error | Warp MISE |\n")
-cat("|--------|:---:|:---:|\n")
-for (i in seq_len(nrow(merged_rank))) {
-  m <- as.character(merged_rank$method[i])
-  cat(sprintf("| %s | %.1f× (rank %d) | %.1f× (rank %d) |\n",
-    mlabs[m],
-    merged_rank$aerr_ratio[i], merged_rank$aerr_rank[i],
-    merged_rank$wmise_ratio[i], merged_rank$wmise_rank[i]))
-}
-
 rank_concordance <- cor(merged_rank$aerr_rank, merged_rank$wmise_rank,
   method = "spearman")
-cat(sprintf(
-  "\nRank concordance (Spearman): %.2f. ", rank_concordance))
+```
+
+**Alignment error vs warp MISE robustness ranking at 30%:**
+
+```{r}
+#| label: alignment-error-rank-table
+merged_rank[, Method := mlabs[as.character(method)]]
+merged_rank[, `Alignment error` := sprintf("%.1f\u00d7 (rank %d)", aerr_ratio, aerr_rank)]
+merged_rank[, `Warp MISE` := sprintf("%.1f\u00d7 (rank %d)", wmise_ratio, wmise_rank)]
+knitr::kable(merged_rank[, .(Method, `Alignment error`, `Warp MISE`)],
+  align = "lcc")
+```
+
+```{r}
+#| label: alignment-error-rank-findings
+#| results: asis
+cat(sprintf("Rank concordance (Spearman): %.2f. ", rank_concordance))
 if (rank_concordance > 0.8) {
   cat("Alignment error and warp MISE robustness rankings are highly consistent.\n")
 } else {
@@ -857,7 +898,14 @@ Degradation heatmaps at 30% contamination across all primary metrics.
 ```{r}
 #| label: robustness-heatmap-helper
 #| fig-height: 6
-# Helper function for degradation heatmaps
+# Cell-level paired ratios for warp MISE heatmap (mirrors aerr_ratios etc.)
+contam_ratios <- dt_paired[,
+  .(ratio = median(warp_ratio, na.rm = TRUE)),
+  by = .(method, dgp, noise_sd, outlier_type, contam_frac)
+]
+
+# Helper function for degradation heatmaps.
+# Input: cell-level paired ratio table with a `ratio` column.
 make_degrad_heatmap <- function(ratios_dt, metric_name) {
   worst_case <- ratios_dt[
     contam_frac == "0.3",
@@ -921,28 +969,31 @@ make_degrad_heatmap(edist_ratios, "Template elastic distance degradation (30% co
 ```{r}
 #| label: summary
 #| results: asis
-# Warp-MISE robustness ranking across all conditions
-overall <- contam_ratios[,
+# Warp-MISE robustness ranking using paired replicate ratios
+overall <- dt_paired[,
   .(
-    median_degrad_10 = round(median(ratio[contam_frac == "0.1"], na.rm = TRUE), 2),
-    median_degrad_20 = round(median(ratio[contam_frac == "0.2"], na.rm = TRUE), 2),
-    median_degrad_30 = round(median(ratio[contam_frac == "0.3"], na.rm = TRUE), 2),
-    max_degrad = round(max(ratio, na.rm = TRUE), 1)
+    median_degrad_10 = round(median(warp_ratio[contam_frac == "0.1"], na.rm = TRUE), 2),
+    median_degrad_20 = round(median(warp_ratio[contam_frac == "0.2"], na.rm = TRUE), 2),
+    median_degrad_30 = round(median(warp_ratio[contam_frac == "0.3"], na.rm = TRUE), 2),
+    max_degrad = round(max(warp_ratio, na.rm = TRUE), 1)
   ),
   by = method
 ]
-overall_30_unc <- mean_se_table(contam_ratios[contam_frac == "0.3"], "ratio", "method")
-overall <- merge(overall, overall_30_unc[, .(method, mean_degrad_30 = mean, se_degrad_30 = se)],
+overall_30_unc <- mean_se_table(
+  dt_paired[contam_frac == "0.3"], "warp_ratio", "method")
+overall <- merge(overall,
+  overall_30_unc[, .(method, mean_degrad_30 = mean, se_degrad_30 = se)],
   by = "method")
 overall <- overall[order(median_degrad_30)]
 
-cat("**Warp-MISE robustness ranking** (median warp MISE degradation ratio, ",
+cat("**Warp-MISE robustness ranking** (median paired warp MISE degradation ratio, ",
     "lower = more robust):\n\n")
 overall[, mean_se_30 := fmt_mean_se(mean_degrad_30, se_degrad_30)]
 knitr::kable(
-  overall[, .(method, median_degrad_10, median_degrad_20, median_degrad_30, mean_se_30, max_degrad)],
+  overall[, .(method, median_degrad_10, median_degrad_20, median_degrad_30,
+              mean_se_30, max_degrad)],
   col.names = c("Method", "10%", "20%", "30% median", "30% mean ± SE", "Worst case"),
-  caption = "Warp-MISE degradation by contamination fraction. Worst case is max across all conditions.")
+  caption = "Warp-MISE degradation by contamination fraction (paired per-replicate ratios). Worst case is max across all conditions.")
 cat("\n")
 
 most_robust <- mlabs[as.character(overall$method[1])]
@@ -968,9 +1019,9 @@ cat("1. **By warp MISE, Landmark is dramatically more robust** than all other me
     "that are robust to global contamination.\n\n")
 
 cat("2. **Phase outliers are more damaging than shape outliers** for iterative ",
-    "template-based methods (SRVF, FDA). Phase outliers warp the template estimate ",
+    "template-based methods (SRVF, CC). Phase outliers warp the template estimate ",
     "via the iterative Procrustes loop, while shape outliers are partially averaged ",
-    "out. Affine is equally affected by both types.\n\n")
+    "out. On paired comparisons, phase outliers increase warp MISE for all methods.\n\n")
 
 contam_profile <- dcast(
   contam_ratios,
@@ -978,16 +1029,18 @@ contam_profile <- dcast(
   value.var = "ratio"
 )
 contam_profile[, monotone := `0.1` <= `0.2` & `0.2` <= `0.3`]
-monotone_n <- sum(contam_profile$monotone)
+monotone_n <- sum(contam_profile$monotone, na.rm = TRUE)
 monotone_total <- nrow(contam_profile)
-cat("3. **No method crashes under contamination.** 0% failure rate across all ",
-    "9,000 runs, even at 30% contamination. Degradation is almost always gradual: ",
-    monotone_n, "/", monotone_total,
-    " method × DGP × noise × outlier profiles show monotone warp-MISE worsening, ",
-    "with only a few near-flat landmark exceptions and no sharp breakdown threshold.\n\n")
+cat(sprintf(
+  "3. **No method crashes under contamination.** %s failure rate across all %d runs, ",
+  sprintf("%.1f%%", 100 * mean(dt$failure)), nrow(dt)),
+  "even at 30%% contamination. Degradation is almost always gradual: ",
+  monotone_n, "/", monotone_total,
+  " method × DGP × noise × outlier profiles show monotone warp-MISE worsening ",
+  "(based on cell-level paired medians), with no sharp breakdown threshold.\n\n")
 
-srvf_noise <- contam_ratios[method == "srvf" & contam_frac == "0.3",
-  .(r = median(ratio)), by = noise_sd]
+srvf_noise <- dt_paired[method == "srvf" & contam_frac == "0.3",
+  .(r = median(warp_ratio, na.rm = TRUE)), by = noise_sd]
 cat(sprintf(
   "4. **SRVF shows an apparent noise-attenuation artifact.** Degradation ratio at 30%% is %.1f× at noise=0.1 but only %.1f× at noise=0.3. ",
   srvf_noise[noise_sd == "0.1"]$r,
@@ -999,15 +1052,25 @@ cat(sprintf(
 cat("5. **Template MISE and elastic distance diverge under contamination.** ",
     "Landmark shows the worst template MISE degradation but only moderate ",
     "elastic distance degradation — outliers shift the template position ",
-    "without distorting its shape. SRVF's elastic distance can even improve ",
-    "under phase contamination in the aggregated ratios, pointing to a ",
-    "phase/template tradeoff rather than uniform template deterioration.\n\n")
+    "without distorting its shape. On paired replicate ratios, SRVF's elastic ",
+    "distance also increases under contamination, consistent with general ",
+    "template deterioration, though the increase is typically smaller than ",
+    "for other metrics.\n\n")
+
+# Compute rank concordance from the alignment-error-findings chunk data
+rank_concordance_summary <- cor(
+  rank(dt_paired[contam_frac == "0.3",
+    .(r = median(aerr_ratio, na.rm = TRUE)), by = method][order(method)]$r),
+  rank(dt_paired[contam_frac == "0.3",
+    .(r = median(warp_ratio, na.rm = TRUE)), by = method][order(method)]$r),
+  method = "spearman")
 
 cat("6. **Practical implication**: For data that may contain outliers, ",
     "Landmark-based registration (or a preprocessing step to remove outliers) ",
     "is the safest choice if warp recovery is the primary target. But the ",
-    "alignment-error ranking differs substantially from the warp-MISE ranking ",
-    "(Spearman 0.10), so the preferred method remains metric-dependent. Among ",
-    "iterative methods, SRVF is more robust than FDA methods to shape outliers ",
+    "alignment-error ranking differs from the warp-MISE ranking ",
+    sprintf("(Spearman rho = %.2f, n = 5 — interpret cautiously), ", rank_concordance_summary),
+    "so the preferred method remains metric-dependent. Among ",
+    "iterative methods, SRVF is more robust than CC methods to shape outliers ",
     "but more vulnerable to phase outliers.\n")
 ```

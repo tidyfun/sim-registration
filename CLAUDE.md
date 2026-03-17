@@ -47,7 +47,7 @@ sbatch slurm/study-a.slurm
 
 - All scripts use `base_dir <- here::here()` for paths.
 - Results are `.rds` files in `results/`, gitignored.
-- DGPs are `D01`–`D15`; methods: `srvf`, `fda_default`, `fda_crit1`, `affine_ss`, `landmark_auto`.
+- DGPs are `D01`–`D15`; methods: `srvf`, `cc_default`, `cc_crit1`, `affine_ss`, `landmark_auto`.
 - Severity (0.5, 1.0) and noise (0, 0.1, 0.3) are the experimental factors beyond DGP × method.
 - Study A v2: 15 DGPs × 2 severity × 3 noise × 5 methods × 100 reps = 45,000 runs.
 - Warp comparison uses forward warps (invert `tf_inv_warps()` via `tf_invert()`).

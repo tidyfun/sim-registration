@@ -1,7 +1,12 @@
 # Rendered outputs
 *.html
+*.knit.md
 *_cache/
 *_files/
+_site/
+
+# Ensure _freeze/ is NOT ignored (needed for GitHub Actions)
+!_freeze/
 
 # Large result files
 results/**/*.rds
@@ -20,3 +25,5 @@ logs/
 
 # PDF outputs
 *.pdf
+
+/.quarto/

@@ -18,32 +18,54 @@ if (requireNamespace("tf", quietly = TRUE)) library(tf) else
 #'
 #' @param data list from generate_data()
 #' @param result list from fit_method() with: registration, time, error
+#' @param transfer_raw logical: if TRUE, compute curve-level metrics after
+#'   transferring estimated warps back to the raw input curves
 #' @return named list of metric values
-extract_metrics <- function(data, result, outlier_mask = NULL) {
+extract_metrics <- function(
+  data,
+  result,
+  outlier_mask = NULL,
+  transfer_raw = FALSE
+) {
   if (!is.null(result$error)) {
     return(failure_metrics(result))
   }
 
   reg <- result$registration
-  aligned <- tf_aligned(reg)
-  inv_warps_est <- tf_inv_warps(reg)
-  template_est <- tf_template(reg)
   arg <- data$arg
+  reg_parts <- resolve_registration_parts(
+    reg = reg,
+    x_eval = result$x_eval %||% data$x,
+    arg = arg
+  )
+  aligned_est <- reg_parts$aligned_est
+  inv_warps_est <- reg_parts$inv_warps_est
+  template_est <- reg_parts$template_est
   template_true <- data$template
   warps_true <- data$warps
   true_prewarp <- data$true_prewarp
-  n <- length(aligned)
+  aligned_curve <- if (isTRUE(transfer_raw)) {
+    safe_metric(function() regularize_tf(tf_warp(data$x, inv_warps_est), arg))
+  } else {
+    aligned_est
+  }
+  template_curve <- if (isTRUE(transfer_raw)) {
+    safe_metric(function() mean(aligned_curve))
+  } else {
+    template_est
+  }
+  n <- length(data$x)
 
   # Subset to inlier curves for per-curve metrics (Study E).
   # Template metrics use all curves (template quality IS affected by outliers).
   if (!is.null(outlier_mask) && any(outlier_mask)) {
     inlier <- !outlier_mask
-    aligned_inlier <- aligned[inlier]
+    aligned_inlier <- aligned_curve[inlier]
     inv_warps_inlier <- inv_warps_est[inlier]
     warps_true_inlier <- warps_true[inlier]
     true_prewarp_inlier <- true_prewarp[inlier]
   } else {
-    aligned_inlier <- aligned
+    aligned_inlier <- aligned_curve
     inv_warps_inlier <- inv_warps_est
     warps_true_inlier <- warps_true
     true_prewarp_inlier <- true_prewarp
@@ -97,7 +119,7 @@ extract_metrics <- function(data, result, outlier_mask = NULL) {
     amp_variance_ratio = safe_metric(
       compute_amp_variance_ratio,
       aligned_inlier,
-      template_est,
+      template_curve,
       true_prewarp_inlier,
       template_true
     ),
@@ -140,6 +162,30 @@ safe_metric <- function(f, ...) {
 }
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
+
+resolve_registration_parts <- function(reg, x_eval, arg) {
+  if (inherits(reg, "tf_registration")) {
+    return(list(
+      aligned_est = regularize_tf(reg$registered, arg),
+      inv_warps_est = reg$inv_warps,
+      template_est = regularize_tf(reg$template, arg)
+    ))
+  }
+
+  aligned_est <- regularize_tf(tf_warp(x_eval, reg), arg)
+  list(
+    aligned_est = aligned_est,
+    inv_warps_est = reg,
+    template_est = regularize_tf(mean(aligned_est), arg)
+  )
+}
+
+regularize_tf <- function(x, arg) {
+  if (inherits(x, "tfd_irreg")) {
+    return(tfd(x, arg = arg))
+  }
+  x
+}
 
 # --- Primary Metrics ----------------------------------------------------------
 

@@ -1,0 +1,48 @@
+---
+title: "Registration Benchmark"
+subtitle: "Comparing curve registration methods for the tf R package"
+---
+
+This benchmark study compares 5 curve registration methods across 15 data-generating
+processes (DGPs), varying warp severity and noise levels. It accompanies the
+[tf](https://github.com/tidyfun/tf) R package for tidy functional data in R.
+
+## Studies
+
+- **[Study A: Main Results](sim-report-main.qmd)** --- Full factorial comparison
+  of 5 methods across 15 DGPs, 2 severity levels, and 3 noise levels (45,000 runs).
+
+- **[Study B: Penalization](sim-report-penalization.qmd)** --- Sensitivity of
+  registration quality to the smoothing penalty parameter $\lambda$.
+
+- **[Study C: Grid Resolution](sim-report-grid.qmd)** --- Effect of evaluation
+  grid density on method performance.
+
+- **[Study D: Oracle Template](sim-report-oracle.qmd)** --- Isolating estimation
+  error by providing the true template function.
+
+- **[Study E: Outlier Contamination](sim-report-outlier.qmd)** --- Robustness of
+  methods under outlier contamination.
+
+- **[Study F: Pre-Smoothing](sim-report-presmoothing.qmd)** --- Impact of
+  pre-smoothing on SRVF registration.
+
+## Methods
+
+| Method | Description |
+|--------|-------------|
+| `srvf` | Square-root velocity function (elastic) registration via `fdasrvf` |
+| `cc_default` | Continuous registration with FPC1 cross-correlation criterion |
+| `cc_crit1` | Continuous registration with L2-distance criterion |
+| `affine_ss` | Affine registration (shift + scale) |
+| `landmark_auto` | Landmark registration with automatic landmark detection |
+
+## Design
+
+The benchmark follows the ADEMP framework (Morris et al. 2019):
+
+- **15 DGPs** (D01–D15) with diverse template shapes and warp structures
+- **2 severity levels** (0.5, 1.0) controlling warp magnitude
+- **3 noise levels** (0, 0.1, 0.3) for additive measurement error
+- **100 replications** per cell
+- **Metrics**: warp MISE, alignment error, SRSF elastic distance, template MISE

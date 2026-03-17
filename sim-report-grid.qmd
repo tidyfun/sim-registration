@@ -1,21 +1,6 @@
 ---
-title: "Registration Benchmark v2 — Study C: Grid Resolution"
-subtitle: "Internal Report — tf Package"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    toc-location: left
-    number-sections: true
-    code-fold: true
-    theme: flatly
-    fig-width: 10
-    fig-height: 6
-    self-contained: true
-execute:
-  cache: true
-  warning: false
-  message: false
+title: "Study C: Grid Resolution"
+subtitle: "Registration Benchmark v2"
 ---
 
 # Setup {.unnumbered}
@@ -758,7 +743,7 @@ cat(sprintf(
   "SRVF timing scales %.1f× from grid=101 to grid=201 (DP alignment is O(n²)). ",
   srvf_ratio
 ))
-cat("FDA methods show negligible timing change across grid sizes.\n")
+cat("CC methods show negligible timing change across grid sizes.\n")
 ```
 
 # Summary {#sec-summary}
@@ -804,29 +789,29 @@ cat(sprintf(
   srvf_51_n0, srvf_201_n0, srvf_51_n3, srvf_201_n3
 ))
 
-# 2. FDA stability
-fda_def_range <- ratio_dt[method == "fda_default",
+# 2. CC stability
+fda_def_range <- ratio_dt[method == "cc_default",
   .(lo = min(ratio, na.rm = TRUE), hi = max(ratio, na.rm = TRUE))]
 cat(sprintf(
-  "2. **FDA methods are grid-insensitive.** fda_default ratios range from ",
-  "%.2f to %.2f across all grids, noise levels, and DGPs. fda_crit1 shows ",
+  "2. **CC methods are grid-insensitive.** cc_default ratios range from ",
+  "%.2f to %.2f across all grids, noise levels, and DGPs. cc_crit1 shows ",
   "slight improvement at finer grids under noise.\n\n",
   fda_def_range$lo, fda_def_range$hi
 ))
 
 # 3. Timing
 cat("3. **SRVF timing scales steeply** (~4× per grid doubling due to O(n²) DP ",
-  "alignment). FDA timing is essentially constant across grids.\n\n")
+  "alignment). CC timing is essentially constant across grids.\n\n")
 
 # 4. Practical
 cat("4. **Grid=101 is a robust default** for `tf_register()`. It avoids SRVF ",
-  "degradation at finer grids while providing sufficient resolution for FDA ",
+  "degradation at finer grids while providing sufficient resolution for CC ",
   "methods. Users who need finer grids with SRVF should investigate whether ",
   "penalization (Study B) can mitigate the derivative noise amplification — ",
   "this hypothesis is not tested in Study C.\n\n")
 
 cat("5. **Grid resolution is a confound for SRVF benchmarking.** ",
   "Method comparisons involving SRVF at grid=201 (or finer) ",
-  "will underestimate SRVF performance relative to FDA methods, especially ",
+  "will underestimate SRVF performance relative to CC methods, especially ",
   "under noise. Studies A and B use grid=101, which is neutral territory.\n")
 ```

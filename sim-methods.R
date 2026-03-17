@@ -14,10 +14,105 @@ if (requireNamespace("tf", quietly = TRUE)) library(tf) else
 method_configs <- function() {
   list(
     srvf = list(method = "srvf", args = list()),
-    fda_default = list(method = "cc", args = list()),
-    fda_crit1 = list(method = "cc", args = list(crit = 1)),
+    cc_default = list(method = "fda", args = list()),
+    cc_crit1 = list(method = "fda", args = list(crit = 1)),
     affine_ss = list(method = "affine", args = list(type = "shift_scale")),
     landmark_auto = list(method = "landmark", args = list())
+  )
+}
+
+study_f_preproc_configs <- function() {
+  list(
+    none = list(
+      family = "none",
+      primary = FALSE,
+      transfer_raw = TRUE,
+      transform = function(x) x
+    ),
+    lowess_f010 = list(
+      family = "tf_smooth",
+      primary = FALSE,
+      transfer_raw = TRUE,
+      transform = function(x) {
+        tf_smooth(x, method = "lowess", f = 0.10, verbose = FALSE)
+      }
+    ),
+    lowess_f015 = list(
+      family = "tf_smooth",
+      primary = TRUE,
+      transfer_raw = TRUE,
+      transform = function(x) {
+        tf_smooth(x, method = "lowess", f = 0.15, verbose = FALSE)
+      }
+    ),
+    spline_local_k15 = list(
+      family = "tfb_spline",
+      primary = FALSE,
+      transfer_raw = TRUE,
+      transform = function(x) {
+        tfb_spline(
+          x,
+          penalized = TRUE,
+          global = FALSE,
+          k = 15,
+          verbose = FALSE
+        )
+      }
+    ),
+    spline_local_k25 = list(
+      family = "tfb_spline",
+      primary = TRUE,
+      transfer_raw = TRUE,
+      transform = function(x) {
+        tfb_spline(
+          x,
+          penalized = TRUE,
+          global = FALSE,
+          k = 25,
+          verbose = FALSE
+        )
+      }
+    ),
+    spline_global_k25 = list(
+      family = "tfb_spline",
+      primary = FALSE,
+      transfer_raw = TRUE,
+      transform = function(x) {
+        tfb_spline(
+          x,
+          penalized = TRUE,
+          global = TRUE,
+          k = 25,
+          verbose = FALSE
+        )
+      }
+    )
+  )
+}
+
+prepare_estimation_input <- function(data, preproc_id = NULL) {
+  if (is.null(preproc_id) || is.na(preproc_id) || identical(preproc_id, "")) {
+    preproc_id <- "none"
+  }
+  configs <- study_f_preproc_configs()
+  if (!preproc_id %in% names(configs)) {
+    cli::cli_abort(
+      "Unknown preproc_id: {preproc_id}. Must be one of: {paste(names(configs), collapse = ', ')}"
+    )
+  }
+  config <- configs[[preproc_id]]
+  x_fit <- config$transform(data$x)
+  x_eval <- as.tfd(x_fit)
+  if (inherits(x_eval, "tfd_irreg")) {
+    x_eval <- tfd(x_eval, arg = data$arg)
+  }
+  list(
+    id = preproc_id,
+    family = config$family,
+    primary = isTRUE(config$primary),
+    transfer_raw = isTRUE(config$transfer_raw),
+    x_fit = x_fit,
+    x_eval = x_eval
   )
 }
 
@@ -37,7 +132,8 @@ fit_method <- function(
   data,
   config_name,
   use_true_template = FALSE,
-  lambda = NULL
+  lambda = NULL,
+  preproc_id = NULL
 ) {
   configs <- method_configs()
   if (!config_name %in% names(configs)) {
@@ -47,15 +143,15 @@ fit_method <- function(
   }
   config <- configs[[config_name]]
 
-  x <- data$x
+  prep <- prepare_estimation_input(data, preproc_id = preproc_id)
+  x <- prep$x_fit
   template <- if (use_true_template) data$template else NULL
 
   # Build call arguments
   call_args <- list(
     x = x,
     method = config$method,
-    template = template,
-    store_x = FALSE
+    template = template
   )
   extra <- config$args
 
@@ -80,7 +176,7 @@ fit_method <- function(
   # Template-based methods: increase Procrustes iterations when estimating
   if (
     !use_true_template &&
-      config$method %in% c("cc", "affine") &&
+      config$method %in% c("fda", "affine") &&
       config_name != "landmark_auto"
   ) {
     call_args$max_iter <- 10L
@@ -109,6 +205,11 @@ fit_method <- function(
   list(
     registration = result$registration,
     time = as.numeric(elapsed),
-    error = result$error
+    error = result$error,
+    x_eval = prep$x_eval,
+    preproc_id = prep$id,
+    preproc_family = prep$family,
+    preproc_primary = prep$primary,
+    transfer_raw = prep$transfer_raw
   )
 }

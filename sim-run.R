@@ -4,7 +4,7 @@
 #   Rscript sim-run.R [study] [n_cores]
 #
 # Arguments:
-#   study:   "A", "B", "C", "D", "pilot", "all"
+#   study:   "A", "B", "C", "D", "E", "F", "Fp", "pilot", "all"
 #   n_cores: number of parallel cores (default: 4)
 #
 # Results saved incrementally per DGP to results/
@@ -21,6 +21,151 @@ source(file.path(base_dir, "sim-dgp.R"))
 source(file.path(base_dir, "sim-methods.R"))
 source(file.path(base_dir, "sim-metrics.R"))
 source(file.path(base_dir, "sim-config.R"))
+
+capture_run_metadata <- function(study, design, n_cores) {
+  git_sha <- tryCatch(
+    system2("git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE)[1],
+    error = function(e) NA_character_
+  )
+  tf_info <- tryCatch(
+    {
+      desc <- utils::packageDescription("tf")
+      list(
+        package = desc$Package %||% "tf",
+        version = desc$Version %||% NA_character_,
+        remote_ref = desc$RemoteRef %||% desc$GithubRef %||% NA_character_,
+        remote_sha = desc$RemoteSha %||% desc$GithubSHA1 %||% NA_character_
+      )
+    },
+    error = function(e) {
+      list(
+        package = "tf",
+        version = NA_character_,
+        remote_ref = NA_character_,
+        remote_sha = NA_character_
+      )
+    }
+  )
+  module_list <- Sys.getenv("LOADEDMODULES", unset = "")
+  env_keys <- c(
+    "SLURM_JOB_ID",
+    "SLURM_JOB_NAME",
+    "SLURM_CLUSTER_NAME",
+    "SLURM_CPUS_PER_TASK",
+    "SLURM_JOB_PARTITION",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS"
+  )
+  env_vals <- Sys.getenv(env_keys, unset = NA_character_)
+  names(env_vals) <- env_keys
+
+  list(
+    study = study,
+    timestamp = format(Sys.time(), tz = "UTC", usetz = TRUE),
+    git_sha = git_sha,
+    tf_info = tf_info,
+    n_cores = n_cores,
+    n_cells = nrow(design),
+    n_runs = sum(design$reps),
+    design_counts = as.data.frame(table(design$study, design$method)),
+    loaded_modules = module_list,
+    env = as.list(env_vals),
+    session_info = utils::capture.output(sessionInfo())
+  )
+}
+
+write_run_metadata <- function(study, design, n_cores) {
+  meta <- capture_run_metadata(study, design, n_cores)
+  saveRDS(
+    meta,
+    file.path(results_dir, sprintf("run-metadata-%s.rds", study))
+  )
+  writeLines(
+    c(
+      sprintf("study: %s", meta$study),
+      sprintf("timestamp: %s", meta$timestamp),
+      sprintf("git_sha: %s", meta$git_sha),
+      sprintf("tf_version: %s", meta$tf_info$version),
+      sprintf("tf_remote_ref: %s", meta$tf_info$remote_ref),
+      sprintf("tf_remote_sha: %s", meta$tf_info$remote_sha),
+      sprintf("n_cores: %s", meta$n_cores),
+      sprintf("n_cells: %s", meta$n_cells),
+      sprintf("n_runs: %s", meta$n_runs),
+      sprintf("loaded_modules: %s", meta$loaded_modules),
+      "env:",
+      paste(sprintf("  %s=%s", names(meta$env), unlist(meta$env))),
+      "",
+      "session_info:",
+      meta$session_info
+    ),
+    file.path(results_dir, sprintf("run-metadata-%s.txt", study))
+  )
+}
+
+write_completion_manifest <- function(study, design, final_results) {
+  expected_rows <- lapply(seq_len(nrow(design)), function(i) {
+    row <- design[i, ]
+    data.frame(
+      study = row$study,
+      dgp = row$dgp,
+      method = row$method,
+      noise_sd = row$noise_sd,
+      severity = row$severity,
+      n_grid = row$n_grid,
+      preproc_id = row$preproc_id %||% NA_character_,
+      lambda = row$lambda %||% NA_real_,
+      contam_frac = row$contam_frac %||% NA_real_,
+      outlier_type = row$outlier_type %||% NA_character_,
+      rep = seq_len(row$reps),
+      stringsAsFactors = FALSE
+    )
+  })
+  expected <- do.call(rbind, expected_rows)
+  expected$key <- apply(expected, 1, paste, collapse = "|")
+
+  observed <- final_results[,
+    c(
+      "study",
+      "dgp",
+      "method",
+      "noise_sd",
+      "severity",
+      "n_grid",
+      "preproc_id",
+      "lambda",
+      "contam_frac",
+      "outlier_type",
+      "rep"
+    )
+  ]
+  observed$key <- apply(observed, 1, paste, collapse = "|")
+  observed_counts <- as.data.frame(
+    table(observed$key),
+    stringsAsFactors = FALSE
+  )
+  names(observed_counts) <- c("key", "n_obs")
+
+  manifest <- merge(
+    unique(expected["key"]),
+    observed_counts,
+    by = "key",
+    all = TRUE
+  )
+  manifest$n_obs[is.na(manifest$n_obs)] <- 0L
+  manifest$complete <- manifest$n_obs == 1L
+  manifest$duplicate <- manifest$n_obs > 1L
+
+  saveRDS(
+    manifest,
+    file.path(results_dir, sprintf("completion-manifest-%s.rds", study))
+  )
+  utils::write.csv(
+    manifest,
+    file.path(results_dir, sprintf("completion-manifest-%s.csv", study)),
+    row.names = FALSE
+  )
+}
 
 # --- Task Definition ----------------------------------------------------------
 
@@ -40,7 +185,11 @@ create_tasks <- function(design) {
         rep = rep,
         study = row$study,
         seed = make_seed(row$dgp, rep),
-        use_true_template = row$use_true_template %||% FALSE
+        use_true_template = row$use_true_template %||% FALSE,
+        preproc_family = row$preproc_family %||% NA_character_,
+        preproc_id = row$preproc_id %||% NA_character_,
+        preproc_primary = row$preproc_primary %||% FALSE,
+        transfer_raw = row$transfer_raw %||% FALSE
       )
       # Study B: lambda
       if (!is.na(row$lambda %||% NA)) {
@@ -119,9 +268,15 @@ run_one_task <- function(task) {
         data,
         task$method,
         use_true_template = task$use_true_template %||% FALSE,
-        lambda = task$lambda
+        lambda = task$lambda,
+        preproc_id = task$preproc_id
       )
-      m <- extract_metrics(data, result, outlier_mask = data$outlier_mask)
+      m <- extract_metrics(
+        data,
+        result,
+        outlier_mask = data$outlier_mask,
+        transfer_raw = task$transfer_raw
+      )
       m$error_msg <- result$error %||% ""
       m
     },
@@ -153,6 +308,10 @@ make_result_row <- function(task, metrics, error_msg = "") {
     lambda = task$lambda %||% NA_real_,
     contam_frac = task$contam_frac %||% NA_real_,
     outlier_type = task$outlier_type %||% NA_character_,
+    preproc_family = task$preproc_family %||% NA_character_,
+    preproc_id = task$preproc_id %||% NA_character_,
+    preproc_primary = task$preproc_primary %||% FALSE,
+    transfer_raw = task$transfer_raw %||% FALSE,
     warp_mise = flat$warp_mise %||% NA_real_,
     alignment_error = flat$alignment_error %||% NA_real_,
     template_mise = flat$template_mise %||% NA_real_,
@@ -175,12 +334,22 @@ make_result_row <- function(task, metrics, error_msg = "") {
 
 #' Run all tasks for one group, save results
 run_batch <- function(tasks, n_cores = 4) {
-  group_key <- paste(
-    tasks[[1]]$dgp,
-    tasks[[1]]$method,
-    tasks[[1]]$study,
-    sep = "_"
-  )
+  if (tasks[[1]]$study %in% c("F", "Fp")) {
+    group_key <- paste(
+      tasks[[1]]$dgp,
+      tasks[[1]]$method,
+      tasks[[1]]$study,
+      tasks[[1]]$preproc_id,
+      sep = "_"
+    )
+  } else {
+    group_key <- paste(
+      tasks[[1]]$dgp,
+      tasks[[1]]$method,
+      tasks[[1]]$study,
+      sep = "_"
+    )
+  }
 
   out_file <- file.path(
     results_dir,
@@ -255,12 +424,14 @@ run_benchmark <- function(study = "pilot", n_cores = 4) {
     C = full_design("C"),
     D = full_design("D"),
     E = full_design("E"),
+    F = full_design("F"),
+    Fp = full_design("Fp"),
     pilot = {
       d <- full_design("A")
       d$reps <- 10
       d
     },
-    all = full_design(c("A", "B", "C", "D", "E")),
+    all = full_design(c("A", "B", "C", "D", "E", "F")),
     cli::cli_abort("Unknown study: {study}")
   )
 
@@ -272,18 +443,22 @@ run_benchmark <- function(study = "pilot", n_cores = 4) {
   task_groups <- split(
     all_tasks,
     sapply(all_tasks, function(t) {
-      paste(t$dgp, t$method, t$study, sep = "_")
+      if (t$study %in% c("F", "Fp")) {
+        paste(t$dgp, t$method, t$study, t$preproc_id, sep = "_")
+      } else {
+        paste(t$dgp, t$method, t$study, sep = "_")
+      }
     })
   )
 
   all_results <- list()
   t0 <- proc.time()
 
-  # Sort batches so slow methods (fda_default) start first for better
+  # Sort batches so slow methods (cc_default) start first for better
   # overall load balancing across the sequential batch loop
   method_order <- c(
-    "fda_default",
-    "fda_crit1",
+    "cc_default",
+    "cc_crit1",
     "srvf",
     "affine_ss",
     "landmark_auto"
@@ -307,6 +482,8 @@ run_benchmark <- function(study = "pilot", n_cores = 4) {
     sprintf("results_combined_%s.rds", study)
   )
   saveRDS(final_results, combined_file)
+  write_run_metadata(study, design, n_cores)
+  write_completion_manifest(study, design, final_results)
 
   elapsed <- (proc.time() - t0)["elapsed"]
   cat(sprintf("\n=== Benchmark Complete ===\n"))

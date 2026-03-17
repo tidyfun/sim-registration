@@ -1,0 +1,42 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - "*.qmd"
+
+website:
+  title: "Registration Benchmark"
+  navbar:
+    left:
+      - text: "Study A: Main"
+        href: sim-report-main.qmd
+      - text: "Study B: Penalization"
+        href: sim-report-penalization.qmd
+      - text: "Study C: Grid"
+        href: sim-report-grid.qmd
+      - text: "Study D: Oracle"
+        href: sim-report-oracle.qmd
+      - text: "Study E: Outliers"
+        href: sim-report-outlier.qmd
+      - text: "Study F: Pre-Smoothing"
+        href: sim-report-presmoothing.qmd
+    right:
+      - icon: github
+        href: https://github.com/tidyfun/sim-registration
+
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    fig-width: 10
+    fig-height: 6
+
+execute:
+  freeze: auto
+  cache: true
+  warning: false
+  message: false

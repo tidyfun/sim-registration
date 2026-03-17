@@ -1,0 +1,884 @@
+---
+title: "Study F: Pre-Smoothing"
+subtitle: "Registration Benchmark v2"
+execute:
+  echo: false
+format:
+  html:
+    code-fold: false
+---
+
+```{r}
+#| label: setup
+library(data.table)
+library(ggplot2)
+library(patchwork)
+
+source("sim-analyze.R")
+
+EPS_MISE <- 1e-12
+RESCUE_BOUND <- log(0.9)
+NONINF_BOUND <- log(1.05)
+
+f_dt <- tryCatch(load_study_f(), error = function(e) e)
+has_results <- !inherits(f_dt, "error")
+
+primary_variants <- c("lowess_f015", "spline_local_k25")
+all_variants <- c(
+  "none", "lowess_f010", "lowess_f015",
+  "spline_local_k15", "spline_local_k25", "spline_global_k25"
+)
+variant_labels <- c(
+  none = "Raw SRVF",
+  lowess_f010 = "LOWESS (f=0.10)",
+  lowess_f015 = "LOWESS (f=0.15)",
+  spline_local_k15 = "Spline local (k=15)",
+  spline_local_k25 = "Spline local (k=25)",
+  spline_global_k25 = "Spline global (k=25)"
+)
+variant_colors <- c(
+  none = "#999999",
+  lowess_f010 = "#E41A1C",
+  lowess_f015 = "#984EA3",
+  spline_local_k15 = "#FF7F00",
+  spline_local_k25 = "#377EB8",
+  spline_global_k25 = "#4DAF4A"
+)
+weak_dgps <- c("D01", "D02", "D05", "D07", "D09", "D10")
+control_dgps <- c("D03", "D12", "D14")
+```
+
+```{r}
+#| label: bail-if-missing
+if (!has_results) {
+  msgs <- c(if (inherits(f_dt, "error")) conditionMessage(f_dt))
+  cat("Study F results are not available yet.\n\n")
+  cat(paste0("- ", msgs, collapse = "\n"))
+  knitr::knit_exit()
+}
+```
+
+# Overview
+
+```{r}
+#| label: overview
+#| results: asis
+f_ok <- f_dt[failure == FALSE]
+n_rows <- nrow(f_dt)
+n_fail <- sum(f_dt$failure)
+n_dgps <- uniqueN(f_dt$dgp)
+n_variants <- uniqueN(f_dt$preproc_id)
+
+cat(sprintf(
+  "**Study F**: %s runs | %d DGPs | %d pre-processing variants | %.1f%% failures\n\n",
+  format(n_rows, big.mark = ","), n_dgps, n_variants, 100 * n_fail / n_rows
+))
+cat(sprintf(
+  "- **Weak DGPs** (SRVF degrades under noise in Study A): %s\n",
+  paste(weak_dgps, collapse = ", ")
+))
+cat(sprintf(
+  "- **Control DGPs** (wiggly templates, harder to smooth): %s\n",
+  paste(control_dgps, collapse = ", ")
+))
+cat("- **Method**: SRVF only (all variants)\n")
+cat("- **Design**: 9 DGPs x 6 variants x 3 noise x 2 severity x 100 reps\n")
+cat("- **Evaluation**: Warps estimated from pre-smoothed curves, then transferred back to raw curves for comparable metrics\n")
+```
+
+# Primary Estimand: Paired Log-Ratio
+
+The primary estimand is the paired log-ratio of warp MISE (pre-smoothed vs raw SRVF)
+on the same `(dgp, rep)` seed. Negative values mean pre-smoothing helps.
+
+```{r}
+#| label: primary-estimand
+none_dt <- f_ok[
+  preproc_id == "none",
+  .(dgp, severity, noise_sd, rep, warp_mise_none = warp_mise)
+]
+
+# Verify pairing: exactly one baseline per (dgp, severity, noise_sd, rep)
+stopifnot(
+  "Non-unique baselines" = !anyDuplicated(none_dt, by = c("dgp", "severity", "noise_sd", "rep"))
+)
+
+ratio_dt <- merge(
+  f_ok[preproc_id != "none"],
+  none_dt,
+  by = c("dgp", "severity", "noise_sd", "rep")
+)
+
+expected_paired <- nrow(f_ok[preproc_id != "none"])
+stopifnot(
+  "Pairing lost rows" = nrow(ratio_dt) == expected_paired
+)
+
+ratio_dt[,
+  log_ratio := log(pmax(warp_mise, EPS_MISE) / pmax(warp_mise_none, EPS_MISE))
+]
+
+summary_dt <- ratio_dt[,
+  .(
+    mean_log_ratio = mean(log_ratio, na.rm = TRUE),
+    mcse = sd(log_ratio, na.rm = TRUE) / sqrt(.N),
+    upper_2mcse = mean(log_ratio, na.rm = TRUE) +
+      2 * sd(log_ratio, na.rm = TRUE) / sqrt(.N),
+    pct_improved = 100 * mean(log_ratio < 0),
+    n = .N
+  ),
+  by = .(dgp, severity, noise_sd, preproc_id, preproc_primary)
+]
+
+summary_dt[, noise_num := as.numeric(as.character(noise_sd))]
+summary_dt[, cell_type := fifelse(
+  dgp %in% weak_dgps & noise_num > 0,
+  "weak_noisy",
+  fifelse(dgp %in% control_dgps | noise_num == 0, "control", "other")
+)]
+
+summary_dt[,
+  decision := fifelse(
+    cell_type == "weak_noisy" & upper_2mcse < RESCUE_BOUND,
+    "rescue",
+    fifelse(
+      cell_type == "control" & upper_2mcse < NONINF_BOUND,
+      "noninferior",
+      "undecided"
+    )
+  )
+]
+```
+
+## All Variants: Warp MISE Ratio Distribution
+
+```{r}
+#| label: all-variants-ratio
+#| fig-width: 11
+#| fig-height: 6
+ratio_dt[, ratio := exp(log_ratio)]
+ratio_dt[, preproc_id_plot := factor(preproc_id, levels = setdiff(all_variants, "none"))]
+
+ratio_breaks <- c(0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 50)
+
+ggplot(
+  ratio_dt,
+  aes(x = noise_sd, y = ratio, fill = preproc_id_plot)
+) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+  scale_fill_manual(values = variant_colors, labels = variant_labels) +
+  scale_y_log10(
+    breaks = ratio_breaks,
+    labels = ratio_breaks
+  ) +
+  labs(
+    x = "Noise level",
+    y = "Warp MISE ratio (vs raw SRVF)",
+    fill = "Pre-processing",
+    subtitle = "< 1 = pre-smoothing helps, > 1 = pre-smoothing hurts"
+  ) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: all-variants-table
+ratio_overall <- ratio_dt[,
+  .(
+    median_ratio = exp(median(log_ratio)),
+    pct_improved = 100 * mean(log_ratio < 0)
+  ),
+  by = .(preproc_id, noise_sd)
+]
+knitr::kable(
+  dcast(ratio_overall, preproc_id ~ noise_sd,
+    value.var = c("median_ratio", "pct_improved")
+  ),
+  digits = 2,
+  caption = "Median warp MISE ratio (variant / raw SRVF) and % of runs improved, by noise level."
+)
+```
+
+## Primary Variants: Cell-Level Ratio Distribution
+
+```{r}
+#| label: primary-logratio-plot
+#| fig-width: 12
+#| fig-height: 12
+primary_raw <- ratio_dt[preproc_id %in% primary_variants]
+primary_raw[, ratio := exp(log_ratio)]
+
+ratio_breaks <- c(0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 50, 200)
+
+ggplot(
+  primary_raw,
+  aes(x = noise_sd, y = ratio, fill = preproc_id)
+) +
+  geom_hline(yintercept = 1, color = "grey40") +
+  geom_hline(
+    yintercept = exp(RESCUE_BOUND),
+    linetype = "dashed",
+    color = "darkgreen",
+    linewidth = 0.3
+  ) +
+  geom_hline(
+    yintercept = exp(NONINF_BOUND),
+    linetype = "dotted",
+    color = "darkred",
+    linewidth = 0.3
+  ) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.2) +
+  facet_grid(dgp ~ severity, labeller = labeller(
+    severity = function(x) paste0("severity = ", x)
+  )) +
+  scale_fill_manual(
+    values = variant_colors[primary_variants],
+    labels = variant_labels[primary_variants]
+  ) +
+  scale_y_log10(
+    breaks = ratio_breaks,
+    labels = ratio_breaks
+  ) +
+  labs(
+    x = "Noise level",
+    y = "Warp MISE ratio (vs raw SRVF)",
+    fill = "Variant",
+    subtitle = "Dashed green = 0.9 (rescue); dotted red = 1.05 (non-inferiority). < 1 = pre-smoothing helps."
+  ) +
+  theme_benchmark(base_size = 10)
+```
+
+# Study-Level Decision Rule
+
+```{r}
+#| label: study-rule
+#| results: asis
+rule_dt <- summary_dt[preproc_id %in% primary_variants]
+
+study_rule <- rule_dt[,
+  .(
+    rescue_pass = sum(cell_type == "weak_noisy" & decision == "rescue"),
+    rescue_total = sum(cell_type == "weak_noisy"),
+    control_pass = sum(cell_type == "control" & decision == "noninferior"),
+    control_total = sum(cell_type == "control")
+  ),
+  by = preproc_id
+]
+study_rule[,
+  plausible_default := rescue_pass >= 18 & (control_total - control_pass) == 0
+]
+
+knitr::kable(
+  study_rule[order(preproc_id)],
+  caption = "Study-level decision rule for the two primary variants."
+)
+
+cat("\n\n")
+for (pid in primary_variants) {
+  sr <- study_rule[preproc_id == pid]
+  cat(sprintf(
+    "**%s**: %d/%d rescue cells pass, %d/%d control cells pass non-inferiority. **%s as unconditional default.**\n\n",
+    variant_labels[pid],
+    sr$rescue_pass, sr$rescue_total,
+    sr$control_pass, sr$control_total,
+    ifelse(sr$plausible_default, "Plausible", "Not plausible")
+  ))
+}
+```
+
+# Cross-Over Analysis
+
+```{r}
+#| label: crossover
+#| fig-width: 9
+#| fig-height: 5
+xover <- ratio_dt[
+  preproc_id == "spline_local_k25",
+  .(
+    mean_lr = mean(log_ratio),
+    pct_better = 100 * mean(log_ratio < 0),
+    mcse = sd(log_ratio) / sqrt(.N)
+  ),
+  by = .(dgp_group = fifelse(dgp %in% weak_dgps, "Weak DGPs", "Control DGPs"),
+    noise_sd, severity)
+]
+
+xover[, mean_ratio := exp(mean_lr)]
+xover[, ratio_lo := exp(mean_lr - 2 * mcse)]
+xover[, ratio_hi := exp(mean_lr + 2 * mcse)]
+
+ratio_breaks_xover <- c(0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20)
+
+ggplot(xover, aes(x = noise_sd, y = mean_ratio, color = dgp_group, group = dgp_group)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = ratio_lo, ymax = ratio_hi),
+    width = 0.06
+  ) +
+  facet_wrap(~severity, labeller = labeller(
+    severity = function(x) paste0("severity = ", x)
+  )) +
+  scale_color_manual(values = c("Weak DGPs" = "#E41A1C", "Control DGPs" = "#377EB8")) +
+  scale_y_log10(
+    breaks = ratio_breaks_xover,
+    labels = ratio_breaks_xover
+  ) +
+  labs(
+    x = "Noise level",
+    y = "Warp MISE ratio (spline_local_k25 vs raw SRVF)",
+    color = NULL,
+    subtitle = "Cross-over: pre-smoothing helps below 1"
+  ) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: crossover-text
+#| results: asis
+noise_levels <- sort(as.numeric(as.character(unique(xover$noise_sd))))
+xover_wide <- dcast(xover, dgp_group + severity ~ noise_sd,
+  value.var = "mean_lr"
+)
+
+for (i in seq_len(nrow(xover_wide))) {
+  r <- xover_wide[i]
+  vals <- as.numeric(r[, as.character(noise_levels), with = FALSE])
+  # Find first transition from positive to negative (or report no cross-over)
+  transitions <- which(vals[-length(vals)] > 0 & vals[-1] < 0)
+  if (length(transitions) > 0) {
+    t1 <- transitions[1]
+    cat(sprintf(
+      "- **%s, severity=%s**: cross-over between noise %s and %s\n",
+      r$dgp_group, r$severity,
+      noise_levels[t1], noise_levels[t1 + 1]
+    ))
+  } else if (all(vals < 0)) {
+    cat(sprintf(
+      "- **%s, severity=%s**: pre-smoothing helps at all noise levels\n",
+      r$dgp_group, r$severity
+    ))
+  } else {
+    cat(sprintf(
+      "- **%s, severity=%s**: pre-smoothing hurts at all noise levels\n",
+      r$dgp_group, r$severity
+    ))
+  }
+}
+```
+
+# Secondary Metrics
+
+## Template Quality
+
+```{r}
+#| label: template-metrics
+#| fig-width: 10
+#| fig-height: 5
+tpl_dt <- f_ok[,
+  .(
+    tmise = median(template_mise, na.rm = TRUE),
+    edist = median(template_elastic_dist, na.rm = TRUE)
+  ),
+  by = .(preproc_id, noise_sd)
+]
+tpl_dt[, preproc_id := factor(preproc_id, levels = all_variants)]
+
+p_tmise <- ggplot(tpl_dt, aes(x = noise_sd, y = tmise, color = preproc_id, group = preproc_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = variant_colors, labels = variant_labels) +
+  scale_y_log10() +
+  labs(x = "Noise", y = "Median template MISE (log)", color = NULL) +
+  theme_benchmark(base_size = 10)
+
+p_edist <- ggplot(tpl_dt, aes(x = noise_sd, y = edist, color = preproc_id, group = preproc_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = variant_colors, labels = variant_labels) +
+  labs(x = "Noise", y = "Median elastic distance", color = NULL) +
+  theme_benchmark(base_size = 10)
+
+p_tmise + p_edist + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: template-table
+knitr::kable(
+  dcast(tpl_dt, preproc_id ~ noise_sd, value.var = "tmise"),
+  digits = 4,
+  caption = "Median template MISE by variant and noise level."
+)
+knitr::kable(
+  dcast(tpl_dt, preproc_id ~ noise_sd, value.var = "edist"),
+  digits = 3,
+  caption = "Median template elastic distance by variant and noise level."
+)
+```
+
+## Alignment Error
+
+```{r}
+#| label: alignment-error
+#| fig-width: 8
+#| fig-height: 4
+ae_dt <- f_ok[,
+  .(align_err = median(alignment_error, na.rm = TRUE)),
+  by = .(preproc_id, noise_sd)
+]
+ae_dt[, preproc_id := factor(preproc_id, levels = all_variants)]
+
+ggplot(ae_dt, aes(x = noise_sd, y = align_err, color = preproc_id, group = preproc_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = variant_colors, labels = variant_labels) +
+  scale_y_log10() +
+  labs(
+    x = "Noise level",
+    y = "Median alignment error (log scale)",
+    color = NULL
+  ) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: alignment-error-table
+knitr::kable(
+  dcast(ae_dt, preproc_id ~ noise_sd, value.var = "align_err"),
+  digits = 4,
+  caption = "Median alignment error by variant and noise level."
+)
+```
+
+# Per-DGP Breakdown
+
+## Warp MISE by DGP and Variant
+
+```{r}
+#| label: per-dgp-heatmap
+#| fig-width: 10
+#| fig-height: 8
+mise_by_dgp <- f_ok[,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, preproc_id, noise_sd)
+]
+
+ggplot(
+  mise_by_dgp,
+  aes(x = preproc_id, y = dgp, fill = log10(warp_mise))
+) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(
+    aes(label = fmt(warp_mise)),
+    size = 2.2
+  ) +
+  facet_wrap(~noise_sd, labeller = labeller(
+    noise_sd = function(x) paste0("noise = ", x)
+  )) +
+  scale_x_discrete(labels = function(x) sub("spline_", "spl_", x)) +
+  scale_fill_viridis_c(option = "plasma", direction = -1, name = "log10(MISE)") +
+  labs(x = NULL, y = NULL, subtitle = "Median warp MISE by DGP, variant, and noise level") +
+  theme_benchmark(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Per-DGP Improvement at Highest Noise
+
+```{r}
+#| label: per-dgp-ratio-high-noise
+#| fig-width: 10
+#| fig-height: 5
+hard_noise <- ratio_dt[
+  as.numeric(as.character(noise_sd)) == 0.3 &
+    as.numeric(as.character(severity)) == 1 &
+    preproc_id %in% c("lowess_f015", "spline_local_k25", "spline_global_k25")
+]
+
+ratio_by_dgp <- hard_noise[,
+  .(
+    median_ratio = exp(median(log_ratio)),
+    pct_improved = 100 * mean(log_ratio < 0)
+  ),
+  by = .(dgp, preproc_id)
+]
+ratio_by_dgp[, dgp_type := fifelse(dgp %in% weak_dgps, "Weak", "Control")]
+
+ggplot(
+  ratio_by_dgp,
+  aes(x = dgp, y = median_ratio, fill = preproc_id)
+) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  facet_grid(~dgp_type, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    values = variant_colors[c("lowess_f015", "spline_local_k25", "spline_global_k25")],
+    labels = variant_labels[c("lowess_f015", "spline_local_k25", "spline_global_k25")]
+  ) +
+  scale_y_log10(
+    breaks = c(0.05, 0.1, 0.2, 0.5, 1, 2),
+    labels = c("0.05", "0.1", "0.2", "0.5", "1", "2")
+  ) +
+  labs(
+    x = NULL,
+    y = "Warp MISE ratio (vs raw SRVF)",
+    fill = NULL,
+    subtitle = "Noise = 0.3, severity = 1.0 | < 1 = pre-smoothing helps"
+  ) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: per-dgp-ratio-table
+knitr::kable(
+  dcast(
+    ratio_by_dgp[, .(dgp, preproc_id, dgp_type, median_ratio, pct_improved)],
+    dgp + dgp_type ~ preproc_id,
+    value.var = c("median_ratio")
+  )[order(dgp)],
+  digits = 3,
+  caption = "Median warp MISE ratio by DGP (noise=0.3, severity=1.0). Values < 1 indicate improvement."
+)
+```
+
+# Variant Comparison
+
+```{r}
+#| label: variant-rank
+#| fig-width: 9
+#| fig-height: 5
+# Rank variants within each cell (lower warp MISE = rank 1)
+rank_dt <- f_ok[,
+  .(warp_mise = median(warp_mise, na.rm = TRUE)),
+  by = .(dgp, severity, noise_sd, preproc_id)
+]
+rank_dt[, rank := rank(warp_mise, ties.method = "min"), by = .(dgp, severity, noise_sd)]
+
+rank_summary <- rank_dt[,
+  .(mean_rank = mean(rank), n_rank1 = sum(rank == 1), n_top2 = sum(rank <= 2)),
+  by = .(preproc_id, noise_sd)
+]
+rank_summary[, preproc_id := factor(preproc_id, levels = all_variants)]
+
+ggplot(rank_summary, aes(x = noise_sd, y = mean_rank, color = preproc_id, group = preproc_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3) +
+  scale_color_manual(values = variant_colors, labels = variant_labels) +
+  scale_y_reverse(breaks = 1:6) +
+  labs(
+    x = "Noise level",
+    y = "Mean rank (lower = better)",
+    color = NULL,
+    subtitle = "Rank 1 = lowest median warp MISE in that cell"
+  ) +
+  theme_benchmark()
+```
+
+```{r}
+#| label: variant-rank-table
+knitr::kable(
+  dcast(rank_summary, preproc_id ~ noise_sd, value.var = "mean_rank"),
+  digits = 2,
+  caption = "Mean rank across cells by variant and noise level."
+)
+```
+
+# Ratio Distributions by DGP Group
+
+```{r}
+#| label: ratio-distributions
+#| fig-width: 11
+#| fig-height: 7
+box_dt <- ratio_dt[
+  preproc_id %in% c("lowess_f015", "spline_local_k25", "spline_global_k25")
+]
+box_dt[, dgp_group := fifelse(dgp %in% weak_dgps, "Weak DGPs", "Control DGPs")]
+
+ratio_breaks_dist <- c(0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 50, 200)
+
+ggplot(box_dt, aes(x = noise_sd, y = ratio, fill = preproc_id)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_boxplot(outlier.size = 0.5, outlier.alpha = 0.3) +
+  facet_grid(dgp_group ~ severity, labeller = labeller(
+    severity = function(x) paste0("severity = ", x)
+  )) +
+  scale_fill_manual(
+    values = variant_colors[c("lowess_f015", "spline_local_k25", "spline_global_k25")],
+    labels = variant_labels[c("lowess_f015", "spline_local_k25", "spline_global_k25")]
+  ) +
+  scale_y_log10(
+    breaks = ratio_breaks_dist,
+    labels = ratio_breaks_dist
+  ) +
+  labs(
+    x = "Noise level",
+    y = "Warp MISE ratio (vs raw SRVF)",
+    fill = NULL,
+    subtitle = "Full distribution across reps. Below 1 = pre-smoothing helps."
+  ) +
+  theme_benchmark()
+```
+
+# Comparison with Study A
+
+```{r}
+#| label: study-a-comparison
+#| fig-width: 10
+#| fig-height: 6
+a_dt <- tryCatch(load_study_a(), error = function(e) NULL)
+has_study_a <- !is.null(a_dt)
+```
+
+```{r}
+#| label: study-a-comparison-helper
+#| eval: !expr has_study_a
+study_f_dgps <- as.character(sort(unique(f_ok$dgp)))
+
+cmp_colors <- c(
+  "SRVF (raw)" = "grey75",
+  "SRVF + spline(k=25)" = "grey30",
+  "cc_default" = "#377EB8",
+  "cc_crit1" = "#4DAF4A",
+  "affine_ss" = "#984EA3",
+  "landmark_auto" = "#FF7F00"
+)
+cmp_labels <- c(
+  "SRVF (raw)" = "SRVF (raw)",
+  "SRVF + spline(k=25)" = "SRVF + spline(k=25)",
+  method_labels()
+)
+cmp_method_levels <- c(
+  "SRVF (raw)", "SRVF + spline(k=25)",
+  "cc_default", "cc_crit1", "affine_ss", "landmark_auto"
+)
+
+build_cmp_dt <- function(metric, f_data = f_ok, a_data = a_dt) {
+  preproc <- f_data[
+    preproc_id == "spline_local_k25",
+    .(
+      med = median(get(metric), na.rm = TRUE),
+      q25 = quantile(get(metric), 0.25, na.rm = TRUE),
+      q75 = quantile(get(metric), 0.75, na.rm = TRUE)
+    ),
+    by = .(dgp, noise_sd, severity)
+  ]
+  preproc[, method := "SRVF + spline(k=25)"]
+
+  raw <- f_data[
+    preproc_id == "none",
+    .(
+      med = median(get(metric), na.rm = TRUE),
+      q25 = quantile(get(metric), 0.25, na.rm = TRUE),
+      q75 = quantile(get(metric), 0.75, na.rm = TRUE)
+    ),
+    by = .(dgp, noise_sd, severity)
+  ]
+  raw[, method := "SRVF (raw)"]
+
+  a_sub <- a_data[
+    dgp %in% study_f_dgps & failure == FALSE,
+    .(
+      med = median(get(metric), na.rm = TRUE),
+      q25 = quantile(get(metric), 0.25, na.rm = TRUE),
+      q75 = quantile(get(metric), 0.75, na.rm = TRUE)
+    ),
+    by = .(dgp, noise_sd, severity, method)
+  ]
+  a_sub[, method := as.character(method)]
+
+  dt <- rbindlist(list(preproc, raw, a_sub), use.names = TRUE)
+  dt <- dt[!is.na(method)]
+  dt[, method := factor(method, levels = c(cmp_method_levels, "srvf"))]
+  dt <- dt[method != "srvf"]
+  dt[, method := droplevels(method)]
+  dt
+}
+
+plot_cmp <- function(dt, metric_label, log_scale = TRUE) {
+  p <- ggplot(
+    dt[as.numeric(as.character(noise_sd)) > 0],
+    aes(y = dgp, x = med, color = method)
+  ) +
+    geom_pointrange(
+      aes(xmin = q25, xmax = q75),
+      position = position_dodge(width = 0.7),
+      size = 0.3,
+      linewidth = 0.5
+    ) +
+    facet_grid(noise_sd ~ severity, labeller = labeller(
+      severity = function(x) paste0("severity = ", x),
+      noise_sd = function(x) paste0("noise = ", x)
+    )) +
+    scale_color_manual(values = cmp_colors, labels = cmp_labels) +
+    labs(y = NULL, x = metric_label, color = "Method") +
+    theme_benchmark(base_size = 9)
+  if (log_scale) {
+    rng <- range(dt[as.numeric(as.character(noise_sd)) > 0, med], na.rm = TRUE)
+    brks <- 10^seq(floor(log10(max(rng[1], 1e-6))), ceiling(log10(rng[2])))
+    brks <- sort(unique(c(brks, brks * 5)))
+    brks <- brks[brks >= rng[1] * 0.5 & brks <= rng[2] * 2]
+    p <- p + scale_x_log10(breaks = brks, labels = brks)
+  }
+  p
+}
+```
+
+## Warp MISE
+
+```{r}
+#| label: study-a-warp-mise
+#| fig-width: 10
+#| fig-height: 8
+#| eval: !expr has_study_a
+cmp_warp <- build_cmp_dt("warp_mise")
+plot_cmp(cmp_warp, "Warp MISE (median + IQR)")
+```
+
+## Alignment Error
+
+```{r}
+#| label: study-a-alignment-error
+#| fig-width: 10
+#| fig-height: 8
+#| eval: !expr has_study_a
+cmp_ae <- build_cmp_dt("alignment_error")
+plot_cmp(cmp_ae, "Alignment error (median + IQR)")
+```
+
+## Template MISE
+
+```{r}
+#| label: study-a-template-mise
+#| fig-width: 10
+#| fig-height: 8
+#| eval: !expr has_study_a
+cmp_tmise <- build_cmp_dt("template_mise")
+plot_cmp(cmp_tmise, "Template MISE (median + IQR)")
+```
+
+## Template Elastic Distance
+
+```{r}
+#| label: study-a-elastic-dist
+#| fig-width: 10
+#| fig-height: 8
+#| eval: !expr has_study_a
+cmp_edist <- build_cmp_dt("template_elastic_dist")
+plot_cmp(cmp_edist, "Template elastic distance (median + IQR)")
+```
+
+## Computation Time
+
+```{r}
+#| label: study-a-time
+#| fig-width: 10
+#| fig-height: 8
+#| eval: !expr has_study_a
+cmp_time <- build_cmp_dt("time")
+plot_cmp(cmp_time, "Computation time in seconds (median + IQR)")
+```
+
+## Summary Table
+
+```{r}
+#| label: study-a-comparison-table
+#| results: asis
+#| eval: !expr has_study_a
+metrics_list <- list(
+  warp_mise = cmp_warp,
+  alignment_error = cmp_ae,
+  template_mise = cmp_tmise,
+  elastic_dist = cmp_edist,
+  time = cmp_time
+)
+
+for (metric_name in names(metrics_list)) {
+  cmp_pooled <- metrics_list[[metric_name]][
+    as.numeric(as.character(noise_sd)) > 0,
+    .(value = median(med, na.rm = TRUE)),
+    by = .(method, noise_sd)
+  ]
+  cat("\n")
+  print(knitr::kable(
+    dcast(cmp_pooled, method ~ noise_sd, value.var = "value"),
+    digits = 4,
+    caption = sprintf(
+      "Pooled median %s across 9 Study F DGPs by noise level.",
+      metric_name
+    )
+  ))
+  cat("\n")
+}
+```
+
+```{r}
+#| label: study-a-missing
+#| results: asis
+if (!has_study_a) {
+  cat("Study A results not available locally. Skipping cross-study comparison.\n")
+}
+```
+
+# Timing
+
+```{r}
+#| label: timing
+#| results: asis
+time_dt <- f_ok[,
+  .(median_time = median(time, na.rm = TRUE)),
+  by = preproc_id
+][order(median_time)]
+
+time_overhead <- max(time_dt$median_time) - min(time_dt$median_time)
+cat(sprintf("Pre-smoothing adds ~%.1fs overhead per run:\n\n", time_overhead))
+knitr::kable(time_dt, digits = 2, col.names = c("Variant", "Median time (s)"))
+```
+
+# Conclusions
+
+```{r}
+#| label: conclusions
+#| results: asis
+# Compute summary statistics for data-driven conclusions
+overall_noisy <- ratio_dt[
+  as.numeric(as.character(noise_sd)) > 0,
+  .(
+    median_reduction = 1 - exp(median(log_ratio))
+  ),
+  by = preproc_id
+]
+best_noisy <- overall_noisy[which.max(median_reduction)]
+
+clean_harm <- ratio_dt[
+  as.numeric(as.character(noise_sd)) == 0,
+  .(median_inflation = exp(median(log_ratio))),
+  by = preproc_id
+]
+best_clean <- clean_harm[which.min(median_inflation)]
+
+time_none <- f_ok[preproc_id == "none", median(time, na.rm = TRUE)]
+time_max <- f_ok[, max(median(time, na.rm = TRUE)), by = preproc_id]$V1 |> max()
+time_overhead <- time_max - time_none
+
+cat(sprintf(
+  "1. **Pre-smoothing strongly rescues SRVF under noise**: The best variant (%s) reduces median warp MISE by %.0f%% under noise (pooled across noise > 0).\n\n",
+  best_noisy$preproc_id, 100 * best_noisy$median_reduction
+))
+
+cat(sprintf(
+  "2. **Pre-smoothing hurts in clean settings**: Even the least harmful variant (%s) inflates warp MISE by %.2fx at noise = 0.\n\n",
+  best_clean$preproc_id, best_clean$median_inflation
+))
+
+cat("3. **Neither primary variant qualifies as an unconditional default**: Both fail too many control cells for non-inferiority, primarily because of the clean-data penalty.\n\n")
+
+cat("4. **Noise-adaptive recommendation**: Pre-smoothing with penalized splines (k=25) is strongly beneficial when noise is known to be present (noise >= 0.1 for weak DGPs, noise >= 0.3 for all DGPs). It should be offered as an option with guidance, not as the default.\n\n")
+
+cat("5. **Spline variants dominate LOWESS**: Penalized splines (k=25) produce less clean-data harm and comparable or better noise rescue than LOWESS smoothing.\n\n")
+
+cat(sprintf(
+  "6. **Timing is not a concern**: Pre-smoothing adds ~%.1fs overhead per run.\n",
+  time_overhead
+))
+```

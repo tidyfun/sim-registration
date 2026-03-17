@@ -8,6 +8,8 @@
 #   study_c_design()  - Grid resolution sensitivity
 #   study_d_design()  - Oracle template comparison
 #   study_e_design()  - Outlier contamination
+#   study_f_design()  - SRVF pre-smoothing study
+#   study_f_pilot_design() - SRVF pre-smoothing pilot
 #   full_design()     - Combined design
 
 # --- Study A: Main Study -----------------------------------------------------
@@ -31,6 +33,10 @@ study_a_design <- function() {
   grid$contam_frac <- NA_real_
   grid$outlier_type <- NA_character_
   grid$lambda <- NA_real_
+  grid$preproc_family <- NA_character_
+  grid$preproc_id <- NA_character_
+  grid$preproc_primary <- FALSE
+  grid$transfer_raw <- FALSE
   grid
 }
 
@@ -49,7 +55,7 @@ study_b_design <- function(
   dgps = c("D01", "D02", "D09", "D12"),
   lambdas = c(0, 1e-4, 1e-3, 0.01, 0.05, 0.1, 1, 10)
 ) {
-  methods <- c("srvf", "fda_default", "fda_crit1")
+  methods <- c("srvf", "cc_default", "cc_crit1")
 
   grid <- expand.grid(
     dgp = dgps,
@@ -67,6 +73,10 @@ study_b_design <- function(
   grid$use_true_template <- FALSE
   grid$contam_frac <- NA_real_
   grid$outlier_type <- NA_character_
+  grid$preproc_family <- NA_character_
+  grid$preproc_id <- NA_character_
+  grid$preproc_primary <- FALSE
+  grid$transfer_raw <- FALSE
   grid
 }
 
@@ -103,6 +113,10 @@ study_c_design <- function(
   grid$contam_frac <- NA_real_
   grid$outlier_type <- NA_character_
   grid$lambda <- NA_real_
+  grid$preproc_family <- NA_character_
+  grid$preproc_id <- NA_character_
+  grid$preproc_primary <- FALSE
+  grid$transfer_raw <- FALSE
   grid
 }
 
@@ -155,6 +169,10 @@ study_d_design <- function(
   grid$contam_frac <- NA_real_
   grid$outlier_type <- NA_character_
   grid$lambda <- NA_real_
+  grid$preproc_family <- NA_character_
+  grid$preproc_id <- NA_character_
+  grid$preproc_primary <- FALSE
+  grid$transfer_raw <- FALSE
   grid
 }
 
@@ -186,6 +204,96 @@ study_e_design <- function(dgps = c("D02", "D09", "D12")) {
   grid$study <- "E"
   grid$use_true_template <- FALSE
   grid$lambda <- NA_real_
+  grid$preproc_family <- NA_character_
+  grid$preproc_id <- NA_character_
+  grid$preproc_primary <- FALSE
+  grid$transfer_raw <- FALSE
+  grid
+}
+
+# --- Study F: SRVF Pre-Smoothing ---------------------------------------------
+
+study_f_target_dgps <- function() {
+  c("D01", "D02", "D05", "D07", "D09", "D10", "D03", "D12", "D14")
+}
+
+study_f_preproc_variants <- function() {
+  data.frame(
+    preproc_id = c(
+      "none",
+      "lowess_f010",
+      "lowess_f015",
+      "spline_local_k15",
+      "spline_local_k25",
+      "spline_global_k25"
+    ),
+    preproc_family = c(
+      "none",
+      "tf_smooth",
+      "tf_smooth",
+      "tfb_spline",
+      "tfb_spline",
+      "tfb_spline"
+    ),
+    preproc_primary = c(FALSE, FALSE, TRUE, FALSE, TRUE, FALSE),
+    transfer_raw = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE),
+    stringsAsFactors = FALSE
+  )
+}
+
+study_f_design <- function(
+  dgps = study_f_target_dgps(),
+  reps = 100L
+) {
+  grid <- expand.grid(
+    dgp = dgps,
+    n_curves = 50,
+    n_grid = 101,
+    noise_sd = c(0, 0.1, 0.3),
+    severity = c(0.5, 1.0),
+    stringsAsFactors = FALSE
+  )
+  variants <- study_f_preproc_variants()
+  grid <- merge(grid, variants, by = NULL)
+  grid$method <- "srvf"
+  grid$reps <- reps
+  grid$study <- "F"
+  grid$use_true_template <- FALSE
+  grid$contam_frac <- NA_real_
+  grid$outlier_type <- NA_character_
+  grid$lambda <- NA_real_
+  rownames(grid) <- NULL
+  grid
+}
+
+study_f_pilot_design <- function(reps = 10L) {
+  noisy <- expand.grid(
+    dgp = c("D01", "D02", "D09", "D12"),
+    n_curves = 50,
+    n_grid = 101,
+    noise_sd = c(0.1, 0.3),
+    severity = 1.0,
+    stringsAsFactors = FALSE
+  )
+  clean <- expand.grid(
+    dgp = c("D01", "D12"),
+    n_curves = 50,
+    n_grid = 101,
+    noise_sd = 0,
+    severity = c(0.5, 1.0),
+    stringsAsFactors = FALSE
+  )
+  grid <- rbind(noisy, clean)
+  variants <- study_f_preproc_variants()
+  grid <- merge(grid, variants, by = NULL)
+  grid$method <- "srvf"
+  grid$reps <- reps
+  grid$study <- "Fp"
+  grid$use_true_template <- FALSE
+  grid$contam_frac <- NA_real_
+  grid$outlier_type <- NA_character_
+  grid$lambda <- NA_real_
+  rownames(grid) <- NULL
   grid
 }
 
@@ -210,7 +318,7 @@ expand_methods <- function(grid) {
 #' All method config names (must match sim-methods.R::method_configs())
 #' @keywords internal
 all_method_names <- function() {
-  c("srvf", "fda_default", "fda_crit1", "affine_ss", "landmark_auto")
+  c("srvf", "cc_default", "cc_crit1", "affine_ss", "landmark_auto")
 }
 
 # --- Seed Generation ----------------------------------------------------------
@@ -233,7 +341,8 @@ full_design <- function(studies = "A") {
   if ("C" %in% studies) designs$C <- study_c_design()
   if ("D" %in% studies) designs$D <- study_d_design()
   if ("E" %in% studies) designs$E <- study_e_design()
-
+  if ("F" %in% studies) designs$F <- study_f_design()
+  if ("Fp" %in% studies) designs$Fp <- study_f_pilot_design()
   design <- do.call(rbind, designs)
   rownames(design) <- NULL
   design$cell_id <- seq_len(nrow(design))

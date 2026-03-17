@@ -1,21 +1,6 @@
 ---
-title: "Registration Benchmark v2 — Study A"
-subtitle: "Internal Report — tf Package"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    toc-location: left
-    number-sections: true
-    code-fold: true
-    theme: flatly
-    fig-width: 10
-    fig-height: 6
-    self-contained: true
-execute:
-  cache: true
-  warning: false
-  message: false
+title: "Study A: Main Results"
+subtitle: "Registration Benchmark v2"
 ---
 
 # Setup {.unnumbered}
@@ -60,50 +45,145 @@ knitr::kable(
 
 # DGP Gallery {#sec-gallery}
 
-Example realizations for each DGP (n=20, severity=0.5, no noise). Each row shows
+Example realizations for each DGP (n=20) across 4 conditions. Each row shows
 the template, the warping functions $h_i(t)$ (dashed = identity), and the resulting
 observed curves $x_i(t)$.
 
+```{r}
+#| label: gallery-helper
+#| cache: false
+make_dgp_conditions <- function(dgp_name) {
+  make_dgp_example(dgp_name, severity = 0.5, noise_sd = 0,
+                   subtitle = "sev=0.5, noise=0") /
+  make_dgp_example(dgp_name, severity = 1.0, noise_sd = 0,
+                   subtitle = "sev=1.0, noise=0") /
+  make_dgp_example(dgp_name, severity = 0.5, noise_sd = 0.1,
+                   subtitle = "sev=0.5, noise=0.1") /
+  make_dgp_example(dgp_name, severity = 1.0, noise_sd = 0.3,
+                   subtitle = "sev=1.0, noise=0.3")
+}
+```
+
 ::: {.panel-tabset}
 
-## Baseline (D01--D04)
+## D01
 
 ```{r}
-#| label: gallery-baseline
+#| label: gallery-d01
 #| fig-height: 12
-#| fig-cap: "Baseline DGPs: phase variation only (no amplitude variation)."
-make_dgp_example("D01") / make_dgp_example("D02") /
-  make_dgp_example("D03") / make_dgp_example("D04")
+make_dgp_conditions("D01")
 ```
 
-## Low-rank amplitude (D05--D08)
+## D02
 
 ```{r}
-#| label: gallery-lowrank
+#| label: gallery-d02
 #| fig-height: 12
-#| fig-cap: "Low-rank amplitude DGPs: rank-1 multiplicative or rank-2 (scale + shift)."
-make_dgp_example("D05") / make_dgp_example("D06") /
-  make_dgp_example("D07") / make_dgp_example("D08")
+make_dgp_conditions("D02")
 ```
 
-## High-rank amplitude (D09--D13, D15)
+## D03
 
 ```{r}
-#| label: gallery-highrank
-#| fig-height: 18
-#| fig-cap: "High-rank amplitude DGPs: 3 FPCs from gait knee data. D13/D15 use non-domain-preserving affine warps."
-make_dgp_example("D09") / make_dgp_example("D10") /
-  make_dgp_example("D11") / make_dgp_example("D12") /
-  make_dgp_example("D13") / make_dgp_example("D15")
+#| label: gallery-d03
+#| fig-height: 12
+make_dgp_conditions("D03")
 ```
 
-## New baseline (D14)
+## D04
+
+```{r}
+#| label: gallery-d04
+#| fig-height: 12
+make_dgp_conditions("D04")
+```
+
+## D05
+
+```{r}
+#| label: gallery-d05
+#| fig-height: 12
+make_dgp_conditions("D05")
+```
+
+## D06
+
+```{r}
+#| label: gallery-d06
+#| fig-height: 12
+make_dgp_conditions("D06")
+```
+
+## D07
+
+```{r}
+#| label: gallery-d07
+#| fig-height: 12
+make_dgp_conditions("D07")
+```
+
+## D08
+
+```{r}
+#| label: gallery-d08
+#| fig-height: 12
+make_dgp_conditions("D08")
+```
+
+## D09
+
+```{r}
+#| label: gallery-d09
+#| fig-height: 12
+make_dgp_conditions("D09")
+```
+
+## D10
+
+```{r}
+#| label: gallery-d10
+#| fig-height: 12
+make_dgp_conditions("D10")
+```
+
+## D11
+
+```{r}
+#| label: gallery-d11
+#| fig-height: 12
+make_dgp_conditions("D11")
+```
+
+## D12
+
+```{r}
+#| label: gallery-d12
+#| fig-height: 12
+make_dgp_conditions("D12")
+```
+
+## D13
+
+```{r}
+#| label: gallery-d13
+#| fig-height: 12
+make_dgp_conditions("D13")
+```
+
+## D14
 
 ```{r}
 #| label: gallery-d14
-#| fig-height: 3
-#| fig-cap: "D14: wiggly template with simple warps and no amplitude variation (completes the wiggly-simple amplitude ladder)."
-make_dgp_example("D14")
+#| fig-height: 12
+make_dgp_conditions("D14")
+```
+
+## D15
+
+```{r}
+#| label: gallery-d15
+#| fig-height: 12
+make_dgp_conditions("D15")
 ```
 
 :::
@@ -327,13 +407,13 @@ if (nrow(stable) == nrow(rank1_all)) {
       wt, paste(sprintf("%s at %s", mlabs[flips$method], flips$cond), collapse = "; ")))
   }
 }
-# Check FDA tail behavior
-fda_iqr <- dt[failure == FALSE & method == "fda_default",
+# Check CC tail behavior
+fda_iqr <- dt[failure == FALSE & method == "cc_default",
   .(iqr = IQR(warp_mise, na.rm = TRUE)), by = warp_type]
 srvf_iqr <- dt[failure == FALSE & method == "srvf",
   .(iqr = IQR(warp_mise, na.rm = TRUE)), by = warp_type]
 if (all(fda_iqr$iqr > srvf_iqr$iqr)) {
-  cat("- FDA methods show competitive medians but heavier tails (more variable performance).\n")
+  cat("- CC methods show competitive medians but heavier tails (more variable performance).\n")
 }
 cat("\n")
 ```

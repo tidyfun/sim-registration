@@ -1,6 +1,6 @@
 # sim-pilot-lambda.R -- Lambda grid pilot for Study B
 #
-# Runs a fine lambda grid for srvf, fda_default, fda_crit1 on 2 DGPs
+# Runs a fine lambda grid for srvf, cc_default, cc_crit1 on 2 DGPs
 # to identify where the MISE-vs-lambda U-shape minimum lies for each method.
 #
 # Design: 2 DGPs x 10 lambdas x 3 methods x 3 noise x 10 reps = 1,800 runs
@@ -24,7 +24,7 @@ source(file.path(base_dir, "sim-run.R"))
 
 pilot_lambda_design <- function() {
   lambdas <- c(0, 1e-4, 1e-3, 5e-3, 0.01, 0.05, 0.1, 0.5, 1, 10)
-  methods <- c("srvf", "fda_default", "fda_crit1")
+  methods <- c("srvf", "cc_default", "cc_crit1")
 
   grid <- expand.grid(
     dgp = c("D02", "D12"),

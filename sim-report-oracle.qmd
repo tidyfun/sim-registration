@@ -1,21 +1,6 @@
 ---
-title: "Registration Benchmark v2 — Study D: Oracle Template"
-subtitle: "Internal Report — tf Package"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    toc-location: left
-    number-sections: true
-    code-fold: true
-    theme: flatly
-    fig-width: 10
-    fig-height: 6
-    self-contained: true
-execute:
-  cache: true
-  warning: false
-  message: false
+title: "Study D: Oracle Template"
+subtitle: "Registration Benchmark v2"
 ---
 
 # Setup {.unnumbered}
@@ -216,7 +201,7 @@ if (nrow(fail_any) == 0) {
 **Oracle benefit** = warp MISE (estimated template) $-$ warp MISE (oracle template).
 Positive values mean the oracle helps (lower warp error with true template).
 Negative values mean the estimated-template pipeline produces *lower* warp error
-than the oracle pipeline — see @sec-fda-default-negative for interpretation.
+than the oracle pipeline — see @sec-cc-default-negative for interpretation.
 
 ## Overview Heatmap
 
@@ -293,12 +278,12 @@ for (cond in c("easy", "hard")) {
 }
 ```
 
-## fda_default: Negative Oracle Benefit {#sec-fda-default-negative}
+## CC (FPC1 cc): Negative Oracle Benefit {#sec-cc-default-negative}
 
 ```{r}
 #| label: fda-default-negative
 #| results: asis
-fda_def <- benefit_wide[method == "fda_default"]
+fda_def <- benefit_wide[method == "cc_default"]
 n_negative <- sum(fda_def$pct_improvement < 0)
 n_total_fda <- nrow(fda_def)
 worst <- fda_def[which.min(pct_improvement)]
@@ -311,7 +296,7 @@ fda_def_by_cond <- fda_def[, .(
 ), by = condition]
 
 cat(sprintf(
-  "**fda_default** shows negative oracle benefit in %d of %d DGP-condition cells ",
+  "**cc_default** shows negative oracle benefit in %d of %d DGP-condition cells ",
   n_negative, n_total_fda
 ))
 cat(sprintf(
@@ -335,18 +320,18 @@ cat("1. **Iteration confound** (@sec-limitations): The estimated pipeline runs "
   "10 Procrustes iterations (jointly refining template and warps), while the oracle ",
   "pipeline runs only 1 (since `tf` sets `max_iter = 1` when a template is provided). ",
   "The additional iterations improve warp estimates even though the template is less accurate.\n\n")
-cat("2. **Objective mismatch**: fda_default uses criterion 2 (eigenfunction-based), ",
+cat("2. **Objective mismatch**: cc_default uses criterion 2 (eigenfunction-based), ",
   "which may converge to a biased template that happens to be easier for its ",
   "warping objective to fit. The iteratively estimated template is co-adapted to ",
   "the warping criterion, whereas the true template is not.\n\n")
 
-# Compare with fda_crit1
-crit1_neg <- benefit_wide[method == "fda_crit1", sum(pct_improvement < 0)]
+# Compare with cc_crit1
+crit1_neg <- benefit_wide[method == "cc_crit1", sum(pct_improvement < 0)]
 cat(sprintf(
-  "By contrast, **fda_crit1** (criterion 1, ISE-based) shows negative oracle benefit ",
+  "By contrast, **cc_crit1** (criterion 1, ISE-based) shows negative oracle benefit ",
   "in only %d of %d cells, suggesting criterion 2 is more sensitive to the ",
   "iteration/co-adaptation effect.\n",
-  crit1_neg, nrow(benefit_wide[method == "fda_crit1"])
+  crit1_neg, nrow(benefit_wide[method == "cc_crit1"])
 ))
 ```
 
@@ -399,7 +384,7 @@ cat(sprintf(
   n_neg
 ))
 cat("benefit. For SRVF, harder conditions amplify the oracle benefit as expected. ",
-  "For fda_default, the negative oracle benefit persists or worsens, consistent ",
+  "For cc_default, the negative oracle benefit persists or worsens, consistent ",
   "with the iteration confound (@sec-limitations).\n")
 ```
 
@@ -564,14 +549,14 @@ if (nrow(sign_disagree) > 0) {
     nrow(sign_disagree), nrow(both)))
 }
 
-# Key insight: fda_default warp vs alignment divergence
-fda_warp <- benefit_wide[method == "fda_default",
+# Key insight: cc_default warp vs alignment divergence
+fda_warp <- benefit_wide[method == "cc_default",
   .(warp_med = median(pct_improvement, na.rm = TRUE)), by = condition]
-fda_ae <- ae_benefit_wide[method == "fda_default",
+fda_ae <- ae_benefit_wide[method == "cc_default",
   .(ae_med = median(pct_improvement, na.rm = TRUE)), by = condition]
 fda_both <- merge(fda_warp, fda_ae, by = "condition")
 if (any(sign(fda_both$warp_med) != sign(fda_both$ae_med))) {
-  cat("**Key insight — fda_default metric divergence**: The warp MISE oracle ",
+  cat("**Key insight — cc_default metric divergence**: The warp MISE oracle ",
     "benefit is negative (estimated pipeline produces better warps due to ",
     "iterative refinement), but the alignment error oracle benefit is positive. ",
     "This means the true template partially compensates for the worse oracle-mode ",
@@ -582,7 +567,7 @@ if (any(sign(fda_both$warp_med) != sign(fda_both$ae_med))) {
     "confound (@sec-limitations).\n")
 } else {
   cat(sprintf(
-    "**fda_default** shows consistent sign across metrics: warp MISE median %.0f%%/%.0f%% ",
+    "**cc_default** shows consistent sign across metrics: warp MISE median %.0f%%/%.0f%% ",
     fda_both[condition == "easy", warp_med], fda_both[condition == "hard", warp_med]))
   cat(sprintf(
     "vs alignment error %.0f%%/%.0f%% (easy/hard).\n",
@@ -699,7 +684,7 @@ cat("Each Procrustes iteration re-estimates warps (and, in estimated mode, the "
   "while the oracle pipeline gets only 1. This means:\n\n")
 cat("- **Positive oracle benefit** (e.g., SRVF) reflects cases where template ",
   "accuracy outweighs the loss of iterative refinement.\n")
-cat("- **Negative oracle benefit** (e.g., fda_default) may partly reflect the ",
+cat("- **Negative oracle benefit** (e.g., cc_default) may partly reflect the ",
   "estimated pipeline's advantage from 10 iterations of joint ",
   "template-warp optimization.\n\n")
 cat("A clean ablation (true vs estimated template, both with matched iterations) ",
@@ -758,8 +743,8 @@ cat("SRVF consistently benefits from the true template, with the advantage ",
   "growing under harder conditions. This is the cleanest evidence that template ",
   "quality matters for warp recovery.\n\n")
 
-# fda_default finding
-fda_def_benefit <- benefit_wide[method == "fda_default",
+# cc_default finding
+fda_def_benefit <- benefit_wide[method == "cc_default",
   .(
     mean_pct = mean(pct_improvement, na.rm = TRUE),
     se_pct = if (.N > 1) sd(pct_improvement, na.rm = TRUE) / sqrt(.N) else 0,
@@ -768,7 +753,7 @@ fda_def_benefit <- benefit_wide[method == "fda_default",
   by = condition
 ]
 cat(sprintf(
-  "3. **fda_default is condition-dependent**: mean oracle benefit %.0f ± %.0f pp in the easy condition but %.0f ± %.0f pp in the hard condition (medians %.0f%% and %.0f%%). ",
+  "3. **cc_default is condition-dependent**: mean oracle benefit %.0f ± %.0f pp in the easy condition but %.0f ± %.0f pp in the hard condition (medians %.0f%% and %.0f%%). ",
   fda_def_benefit[condition == "easy", mean_pct],
   fda_def_benefit[condition == "easy", se_pct],
   fda_def_benefit[condition == "hard", mean_pct],
@@ -792,7 +777,7 @@ cat(sprintf(
 
 cat("6. **Implication for `tf_register()`**: The asymmetry between methods suggests ",
   "that (a) SRVF registration would benefit most from better template initialization ",
-  "or multi-resolution estimation, and (b) fda_default's criterion 2 benefits from ",
+  "or multi-resolution estimation, and (b) cc_default's criterion 2 benefits from ",
   "iterative joint optimization, making the number of Procrustes iterations an ",
   "important tuning parameter for this method.\n\n")
 
@@ -806,10 +791,10 @@ ae_final <- ae_benefit_wide[method != "landmark_auto",
 ][order(-mean_pct)]
 cat("7. **Alignment error tells a different story** (@sec-alignment-error): ",
   "Oracle benefit is positive for all methods when measured by alignment error, ",
-  "even fda_default. ")
-fda_ae_summary <- ae_final[method == "fda_default"]
+  "even cc_default. ")
+fda_ae_summary <- ae_final[method == "cc_default"]
 cat(sprintf(
-  "fda_default's alignment error oracle benefit is %.0f ± %.0f pp (positive), while its ",
+  "cc_default's alignment error oracle benefit is %.0f ± %.0f pp (positive), while its ",
   fda_ae_summary$mean_pct, fda_ae_summary$se_pct))
 cat("warp MISE oracle benefit is negative. The true template compensates for worse ",
   "oracle-mode warps when computing aligned curves, revealing that the two metrics ",

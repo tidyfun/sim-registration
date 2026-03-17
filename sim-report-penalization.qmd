@@ -1,21 +1,6 @@
 ---
-title: "Registration Benchmark v2 — Study B: Penalization"
-subtitle: "Internal Report — tf Package"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    toc-location: left
-    number-sections: true
-    code-fold: true
-    theme: flatly
-    fig-width: 10
-    fig-height: 6
-    self-contained: true
-execute:
-  cache: true
-  warning: false
-  message: false
+title: "Study B: Penalization"
+subtitle: "Registration Benchmark v2"
 ---
 
 # Setup {.unnumbered}
@@ -122,7 +107,7 @@ lambda_comp <- compare_optima(
 
 Study B tests whether regularization (lambda > 0) can rescue registration methods
 in regimes where they struggle. Design: 4 DGPs $\times$ 8 lambdas $\times$ 3 methods
-(SRVF, FDA default, FDA crit1) $\times$ 3 noise $\times$ 2 severity $\times$ 33 reps
+(SRVF, CC default, CC crit1) $\times$ 3 noise $\times$ 2 severity $\times$ 33 reps
 = 19,008 runs.
 
 Lambda grid calibrated by pilot (job 5131464):
@@ -344,40 +329,40 @@ if (nrow(big_win) > 0) {
 cat("\n")
 ```
 
-# FDA Criterion Comparison {#sec-criteria}
+# CC Criterion Comparison {#sec-criteria}
 
-Does fda_crit1 respond differently to lambda than fda_default?
+Does cc_crit1 respond differently to lambda than cc_default?
 
 ```{r}
 #| label: criteria-severity-note
 #| results: asis
 # Check whether severity=0.5 patterns differ qualitatively
-fda_both <- dt[failure == FALSE & method %in% c("fda_default", "fda_crit1")]
+fda_both <- dt[failure == FALSE & method %in% c("cc_default", "cc_crit1")]
 fda_agg_both <- fda_both[,
   .(mise = median(warp_mise, na.rm = TRUE)),
   by = .(method, dgp, noise_sd, severity, lambda)
 ]
 # Correlation of MISE profiles across severity
 cor_default <- cor(
-  fda_agg_both[method == "fda_default" & severity == "0.5", mise],
-  fda_agg_both[method == "fda_default" & severity == "1", mise],
+  fda_agg_both[method == "cc_default" & severity == "0.5", mise],
+  fda_agg_both[method == "cc_default" & severity == "1", mise],
   use = "complete.obs"
 )
 cor_crit1 <- cor(
-  fda_agg_both[method == "fda_crit1" & severity == "0.5", mise],
-  fda_agg_both[method == "fda_crit1" & severity == "1", mise],
+  fda_agg_both[method == "cc_crit1" & severity == "0.5", mise],
+  fda_agg_both[method == "cc_crit1" & severity == "1", mise],
   use = "complete.obs"
 )
 cat(sprintf(
-  "Results shown for severity=1.0. MISE profiles are highly correlated across severities (r=%.2f for fda_default, r=%.2f for fda_crit1); severity=0.5 patterns are qualitatively similar.\n\n",
+  "Results shown for severity=1.0. MISE profiles are highly correlated across severities (r=%.2f for cc_default, r=%.2f for cc_crit1); severity=0.5 patterns are qualitatively similar.\n\n",
   cor_default, cor_crit1))
 ```
 
 ```{r}
 #| label: criteria-comparison
 #| fig-height: 8
-#| fig-cap: "Direct comparison of fda_default vs fda_crit1 MISE across lambda values. Points show medians and vertical bars show IQRs in each DGP × noise panel at severity=1.0."
-fda_dt <- dt[failure == FALSE & method %in% c("fda_default", "fda_crit1")]
+#| fig-cap: "Direct comparison of cc_default vs cc_crit1 MISE across lambda values. Points show medians and vertical bars show IQRs in each DGP × noise panel at severity=1.0."
+fda_dt <- dt[failure == FALSE & method %in% c("cc_default", "cc_crit1")]
 fda_agg <- aggregate_median_iqr(
   dt = fda_dt[severity == "1"],
   metric = "warp_mise",
@@ -410,33 +395,33 @@ ggplot(fda_agg,
 ```{r}
 #| label: criteria-findings
 #| results: asis
-# Compare optimal lambdas for the two FDA methods
-fda_opt <- optimal[method %in% c("fda_default", "fda_crit1")]
+# Compare optimal lambdas for the two CC methods
+fda_opt <- optimal[method %in% c("cc_default", "cc_crit1")]
 fda_comp <- dcast(
   fda_opt[, .(method, dgp, noise_sd, severity, lambda, mise)],
   dgp + noise_sd + severity ~ method,
   value.var = list("lambda", "mise")
 )
 
-cat("**FDA criterion comparison:**\n\n")
+cat("**CC criterion comparison:**\n\n")
 # Paired comparison: how often is crit1's optimal lambda higher/lower/equal?
-fda_comp[, crit1_higher := lambda_fda_crit1 > lambda_fda_default]
-fda_comp[, crit1_lower := lambda_fda_crit1 < lambda_fda_default]
-fda_comp[, crit1_equal := lambda_fda_crit1 == lambda_fda_default]
+fda_comp[, crit1_higher := lambda_cc_crit1 > lambda_cc_default]
+fda_comp[, crit1_lower := lambda_cc_crit1 < lambda_cc_default]
+fda_comp[, crit1_equal := lambda_cc_crit1 == lambda_cc_default]
 n_higher <- sum(fda_comp$crit1_higher, na.rm = TRUE)
 n_lower <- sum(fda_comp$crit1_lower, na.rm = TRUE)
 n_equal <- sum(fda_comp$crit1_equal, na.rm = TRUE)
 n_comp <- nrow(fda_comp)
 cat(sprintf(
-  "- Paired comparison of optimal λ: fda_crit1 higher in %d/%d, lower in %d/%d, equal in %d/%d cells.\n",
+  "- Paired comparison of optimal λ: cc_crit1 higher in %d/%d, lower in %d/%d, equal in %d/%d cells.\n",
   n_higher, n_comp, n_lower, n_comp, n_equal, n_comp))
 
 # Which criterion wins at its own optimal lambda?
-fda_comp[, crit1_wins := mise_fda_crit1 < mise_fda_default]
-cat(sprintf("- At each method's optimal lambda, fda_crit1 wins in %d/%d conditions.\n",
+fda_comp[, crit1_wins := mise_cc_crit1 < mise_cc_default]
+cat(sprintf("- At each method's optimal lambda, cc_crit1 wins in %d/%d conditions.\n",
   sum(fda_comp$crit1_wins, na.rm = TRUE), nrow(fda_comp)))
 
-fda_comp[, mise_gap := mise_fda_crit1 - mise_fda_default]
+fda_comp[, mise_gap := mise_cc_crit1 - mise_cc_default]
 gap_summary <- mean_se_table(fda_comp, "mise_gap", character())[1]
 cat(sprintf(
   "- At each method's own optimum, the average MISE difference (crit1 - default) is %s.\n",
@@ -447,7 +432,7 @@ cat("\n")
 
 # SRVF Lambda Behavior {#sec-srvf}
 
-SRVF's lambda response is expected to differ qualitatively from FDA methods.
+SRVF's lambda response is expected to differ qualitatively from CC methods.
 
 ```{r}
 #| label: srvf-severity-note

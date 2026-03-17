@@ -2,6 +2,7 @@
 #
 # Provides:
 #   load_study_a()        - Load and annotate Study A results
+#   load_study_f()        - Load Study F presmoothing results
 #   dgp_factors()         - DGP factor lookup table
 #   dgp_desc_labels()     - Descriptive DGP labels for plots
 #   aggregate_metric()    - Aggregate one metric by cells
@@ -131,6 +132,14 @@ dgp_short_labels <- function() {
 
 # --- Load Results -------------------------------------------------------------
 
+#' Recode legacy method names from v2 results
+#' fda_default -> cc_default, fda_crit1 -> cc_crit1
+recode_method_names <- function(dt) {
+  dt[method == "fda_default", method := "cc_default"]
+  dt[method == "fda_crit1", method := "cc_crit1"]
+  dt[]
+}
+
 load_study_a <- function(results_dir = file.path(base_dir, "results")) {
   files <- list.files(
     results_dir,
@@ -140,6 +149,7 @@ load_study_a <- function(results_dir = file.path(base_dir, "results")) {
   if (length(files) == 0) stop("No Study A result files found in ", results_dir)
 
   dt <- rbindlist(lapply(files, readRDS))
+  recode_method_names(dt)
 
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
@@ -150,8 +160,8 @@ load_study_a <- function(results_dir = file.path(base_dir, "results")) {
       method,
       levels = c(
         "srvf",
-        "fda_default",
-        "fda_crit1",
+        "cc_default",
+        "cc_crit1",
         "affine_ss",
         "landmark_auto"
       )
@@ -188,6 +198,7 @@ load_study_b <- function(results_dir = file.path(base_dir, "results")) {
   if (length(files) == 0) stop("No Study B result files found in ", results_dir)
 
   dt <- rbindlist(lapply(files, readRDS))
+  recode_method_names(dt)
 
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
@@ -196,7 +207,7 @@ load_study_b <- function(results_dir = file.path(base_dir, "results")) {
   dt[,
     method := factor(
       method,
-      levels = c("srvf", "fda_default", "fda_crit1")
+      levels = c("srvf", "cc_default", "cc_crit1")
     )
   ]
   dt[, severity := factor(severity)]
@@ -223,6 +234,7 @@ load_study_c <- function(results_dir = file.path(base_dir, "results")) {
   if (length(files) == 0) stop("No Study C result files found in ", results_dir)
 
   dt <- rbindlist(lapply(files, readRDS))
+  recode_method_names(dt)
 
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
@@ -233,8 +245,8 @@ load_study_c <- function(results_dir = file.path(base_dir, "results")) {
       method,
       levels = c(
         "srvf",
-        "fda_default",
-        "fda_crit1",
+        "cc_default",
+        "cc_crit1",
         "affine_ss",
         "landmark_auto"
       )
@@ -266,6 +278,7 @@ load_study_d <- function(results_dir = file.path(base_dir, "results")) {
   if (length(files) == 0) stop("No Study D result files found in ", results_dir)
 
   dt <- rbindlist(lapply(files, readRDS))
+  recode_method_names(dt)
 
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
@@ -276,8 +289,8 @@ load_study_d <- function(results_dir = file.path(base_dir, "results")) {
       method,
       levels = c(
         "srvf",
-        "fda_default",
-        "fda_crit1",
+        "cc_default",
+        "cc_crit1",
         "affine_ss",
         "landmark_auto"
       )
@@ -324,6 +337,7 @@ load_study_e <- function(results_dir = file.path(base_dir, "results")) {
   if (length(files) == 0) stop("No Study E result files found in ", results_dir)
 
   dt <- rbindlist(lapply(files, readRDS))
+  recode_method_names(dt)
 
   factors <- dgp_factors()
   dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
@@ -334,8 +348,8 @@ load_study_e <- function(results_dir = file.path(base_dir, "results")) {
       method,
       levels = c(
         "srvf",
-        "fda_default",
-        "fda_crit1",
+        "cc_default",
+        "cc_crit1",
         "affine_ss",
         "landmark_auto"
       )
@@ -355,6 +369,49 @@ load_study_e <- function(results_dir = file.path(base_dir, "results")) {
     uniqueN(dt$method),
     uniqueN(dt$contam_frac),
     uniqueN(dt$outlier_type),
+    100 * mean(dt$failure, na.rm = TRUE)
+  ))
+  dt
+}
+
+load_study_f <- function(results_dir = file.path(base_dir, "results")) {
+  all_f <- list.files(
+    results_dir,
+    pattern = "^results_D\\d+_\\w+_F.*\\.rds$",
+    full.names = TRUE
+  )
+  files_f <- all_f[!grepl("_Fp", basename(all_f))]
+  files_fp <- all_f[grepl("_Fp", basename(all_f))]
+  files <- if (length(files_f) > 0) files_f else files_fp
+  if (length(files) == 0) stop("No Study F result files found in ", results_dir)
+
+  dt <- rbindlist(lapply(files, readRDS))
+  factors <- dgp_factors()
+  dt <- merge(dt, factors, by = "dgp", all.x = TRUE)
+
+  dt[, dgp := factor(dgp, levels = sort(unique(dgp)))]
+  dt[, method := factor(method, levels = "srvf")]
+  dt[, noise_sd := factor(noise_sd)]
+  dt[, severity := factor(severity)]
+  dt[,
+    preproc_id := factor(
+      preproc_id,
+      levels = c(
+        "none",
+        "lowess_f010",
+        "lowess_f015",
+        "spline_local_k15",
+        "spline_local_k25",
+        "spline_global_k25"
+      )
+    )
+  ]
+
+  message(sprintf(
+    "Loaded %d rows | %d DGPs | %d variants | %.1f%% failures",
+    nrow(dt),
+    uniqueN(dt$dgp),
+    uniqueN(dt$preproc_id),
     100 * mean(dt$failure, na.rm = TRUE)
   ))
   dt
@@ -694,8 +751,8 @@ theme_benchmark <- function(base_size = 11) {
 method_colors <- function() {
   c(
     srvf = "#E41A1C",
-    fda_default = "#377EB8",
-    fda_crit1 = "#4DAF4A",
+    cc_default = "#377EB8",
+    cc_crit1 = "#4DAF4A",
     affine_ss = "#984EA3",
     landmark_auto = "#FF7F00"
   )
@@ -704,8 +761,8 @@ method_colors <- function() {
 method_labels <- function() {
   c(
     srvf = "SRVF",
-    fda_default = "FDA (default)",
-    fda_crit1 = "FDA (crit 1)",
+    cc_default = "CC (FPC1 cc)",
+    cc_crit1 = "CC (L2 dist)",
     affine_ss = "Affine (S+S)",
     landmark_auto = "Landmark (auto)"
   )
@@ -947,7 +1004,8 @@ make_dgp_example <- function(
   n = 20,
   severity = 0.5,
   noise_sd = 0,
-  seed = 42
+  seed = 42,
+  subtitle = NULL
 ) {
   source(file.path(base_dir, "sim-dgp.R"))
   data <- generate_data(
@@ -967,6 +1025,7 @@ make_dgp_example <- function(
     ggplot2::geom_line() +
     ggplot2::labs(
       title = desc,
+      subtitle = subtitle,
       x = "t",
       y = "template"
     ) +
@@ -1175,7 +1234,7 @@ make_contam_case_study <- function(
   severity = 0.5,
   n = 50,
   seed = 42,
-  methods = c("srvf", "fda_default", "fda_crit1", "affine_ss", "landmark_auto")
+  methods = c("srvf", "cc_default", "cc_crit1", "affine_ss", "landmark_auto")
 ) {
   source(file.path(base_dir, "sim-dgp.R"))
   source(file.path(base_dir, "sim-methods.R"))
